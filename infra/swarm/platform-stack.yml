@@ -1,0 +1,85 @@
+services:
+  platform-api:
+    image: ${BAIRUI_PLATFORM_IMAGE:-bairui/platform-api:local}
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: '8080'
+      BAIRUI_SESSION_SECRET: ${BAIRUI_SESSION_SECRET:-local-only-change-this-secret}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must point to PostgreSQL}
+    networks: [bairui]
+    deploy:
+      # P0 使用进程内存保存会话和 Outbox 记录。
+      replicas: 1
+      update_config:
+        order: start-first
+        parallelism: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  platform-worker:
+    image: ${BAIRUI_PLATFORM_IMAGE:-bairui/platform-api:local}
+    command: ['node', 'src/worker-index.mjs']
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must point to PostgreSQL}
+    networks: [bairui]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  mock-runtime:
+    image: ${BAIRUI_PLATFORM_IMAGE:-bairui/platform-api:local}
+    command: ['node', 'src/mock-runtime-server.mjs']
+    environment:
+      PORT: '8090'
+    networks: [bairui]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [bairui]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+networks:
+  bairui:
+    driver: overlay
+    attachable: true
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+configs:
+  caddyfile:
+    file: ../caddy/Caddyfile

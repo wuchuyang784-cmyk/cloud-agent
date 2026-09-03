@@ -1,0 +1,13 @@
+{
+  auto_https off
+  admin off
+}
+
+localhost {
+  reverse_proxy platform-api:8080
+}
+
+*.localhost {
+  # P0 阶段将 Agent 主机名保留在平台认证边界之后。
+  reverse_proxy platform-api:8080
+}

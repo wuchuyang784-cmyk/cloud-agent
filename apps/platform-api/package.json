@@ -1,0 +1,14 @@
+{
+  "name": "@bairui/platform-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/index.mjs",
+    "start:runtime": "node src/mock-runtime-server.mjs",
+    "start:worker": "node src/worker-index.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
+  }
+}
