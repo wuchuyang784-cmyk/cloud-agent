@@ -9,6 +9,22 @@
 - 跨仓 Schema：`BaiRui-contracts`
 - upstream registry：`BaiRui-agent/integrations/upstreams.yaml`
 
+## 上游引擎子模块（本仓 `upstreams/`）
+
+pi-agent 与 deepseek-harness（dsh）作为**只读 git submodule** 挂载在本仓，pin 到核对过的提交。沿用 BaiLongma 上游模式（`docs/20` §2.1）：不在子模块内提交任何 BaiRui 行为，平台只基于 pin 提交做确定性构建与兼容验收。
+
+| 引擎 | 子模块路径 | 上游仓库 | 上游默认分支 | 当前 pin（2026-09-07） | 协议 | 说明 |
+| --- | --- | --- | --- | --- | --- | --- |
+| pi-agent | `upstreams/pi` | `earendil-works/pi` | `main` | `c1d4c801114545f47c440921d8b3e04aeb1e565d`（v0.0.2 之后 6036 提交） | MIT | npm workspace；`packages/` 下 `agent`（pi-agent-core）、`ai`（pi-ai）、`coding-agent`（CLI）、`server`、`session-backends`、`tui` 等 |
+| deepseek-harness (dsh) | `upstreams/dsh` | `deepseek-ai/deepseek-harness` | `master` | `b0a7d2ce3b4c19d7452e364b2d7acbfa87e707ed`（dsh-v0.1.3-alpha.2 之后 106 提交） | MIT | pnpm workspace，插件化 Harness；`packages/` 下 `core`、`api`、`host`、`session`、`preset`、`bundle`、`client`/`web` 等 |
+
+维护约定：
+
+- 新 clone 本仓后执行 `git submodule update --init --recursive`（`.gitmodules` 与 gitlink 已在提交中）。
+- 升级 pin：先在上游拉取候选提交，参照 `BAILONGMA-UPSTREAM-COMPATIBILITY.md` 的兼容验收流程评估，再更新 `.gitmodules`、本表和索引（gitlink）。
+- 注意 dsh 上游默认分支是 `master`（非 `main`），pi 是 `main`；一律以 commit pin 为准，不做分支跟踪。
+- 引擎基线镜像（`bairui-agent-pi` / `bairui-agent-dsh`）的 Dockerfile 与平台注入侧实现以这两个 pin 为构建基线，规格见 `28-dual-engine-platform-build-specs.md` §3。
+
 ## 当前规范
 
 | 范围 | 文档 |
