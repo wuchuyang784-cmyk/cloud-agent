@@ -6,6 +6,7 @@
     "test": "node --test",
     "start": "node src/index.mjs",
     "start:runtime": "node src/mock-runtime-server.mjs",
+    "start:boundary": "node src/runtime/boundary-server.mjs",
     "start:worker": "node src/worker-index.mjs"
   },
   "dependencies": {

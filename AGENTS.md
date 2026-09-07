@@ -68,6 +68,10 @@ packages/db/migrations/022_agent_templates.sql
 packages/db/migrations/023_auth_sessions.sql
 packages/db/migrations/024_worker_rls.sql
 packages/db/migrations/025_client_resources.sql
+packages/db/migrations/026_conversation_messages.sql
+packages/db/migrations/027_client_resource_contents.sql
+packages/db/migrations/028_agent_user_features.sql
+packages/db/migrations/029_agent_engine_rls.sql
 ```
 
 新增表结构时：

@@ -268,3 +268,137 @@ export async function streamChat(
 export async function fetchUsage(range: 'today' | '7d' | '30d'): Promise<UsagePayload> {
   return request<UsagePayload>('/api/user/usage?range=' + range);
 }
+
+export interface FavoriteItem {
+  id: string;
+  targetType: 'agent' | 'resource';
+  targetId: string;
+  name: string;
+  status?: string | null;
+  createdAt?: string;
+}
+
+export interface BackendNotification {
+  id: string;
+  type: 'system' | 'billing' | 'agent' | 'resource';
+  title: string;
+  body: string;
+  isRead: boolean;
+  readAt?: string | null;
+  createdAt?: string;
+}
+
+export interface UserSettings {
+  displayName: string | null;
+  prefs: Record<string, unknown>;
+  updatedAt?: string;
+}
+
+export interface AccountInfo {
+  balanceCents: number;
+  currency: string;
+  updatedAt?: string;
+}
+
+export interface BillingTransaction {
+  id: string;
+  type: 'recharge' | 'consume';
+  amountCents: number;
+  balanceAfterCents: number;
+  referenceType?: string | null;
+  referenceId?: string | null;
+  description?: string | null;
+  createdAt?: string;
+}
+
+export interface FilingRecord {
+  id: string;
+  domain: string;
+  subjectName: string;
+  subjectType: 'enterprise' | 'individual';
+  icpNumber?: string | null;
+  status: 'submitted' | 'approved' | 'rejected' | 'draft';
+  remark?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export async function fetchFavorites(): Promise<FavoriteItem[]> {
+  return (await request<{ favorites: FavoriteItem[] }>('/api/user/favorites')).favorites;
+}
+
+export async function addFavorite(targetType: 'agent' | 'resource', targetId: string): Promise<FavoriteItem> {
+  return (
+    await request<{ favorite: FavoriteItem }>('/api/user/favorites', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ targetType, targetId }),
+    })
+  ).favorite;
+}
+
+export async function removeFavorite(id: string): Promise<void> {
+  await request<void>('/api/user/favorites/' + encodeURIComponent(id), { method: 'DELETE' });
+}
+
+export async function fetchNotifications(): Promise<{ notifications: BackendNotification[]; unreadCount: number }> {
+  return request<{ notifications: BackendNotification[]; unreadCount: number }>('/api/user/notifications');
+}
+
+export async function readAllNotifications(): Promise<number> {
+  return (
+    await request<{ ok: boolean; updated: number }>('/api/user/notifications/read-all', { method: 'POST' })
+  ).updated;
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  await request<{ ok: boolean }>('/api/user/notifications/' + encodeURIComponent(id), {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ read: true }),
+  });
+}
+
+export async function fetchSettings(): Promise<UserSettings> {
+  return (await request<{ settings: UserSettings }>('/api/user/settings')).settings;
+}
+
+export async function updateSettings(patch: { displayName?: string | null; prefs?: Record<string, unknown> }): Promise<UserSettings> {
+  return (
+    await request<{ settings: UserSettings }>('/api/user/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+  ).settings;
+}
+
+export async function fetchAccount(): Promise<AccountInfo> {
+  return (await request<{ account: AccountInfo }>('/api/user/account')).account;
+}
+
+export async function rechargeAccount(amountCents: number, remark?: string): Promise<{ transaction: BillingTransaction; account: AccountInfo }> {
+  return request<{ transaction: BillingTransaction; account: AccountInfo }>('/api/user/billing/recharge', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ amountCents, remark }),
+  });
+}
+
+export async function fetchTransactions(): Promise<BillingTransaction[]> {
+  return (await request<{ transactions: BillingTransaction[] }>('/api/user/billing/transactions')).transactions;
+}
+
+export async function fetchFilings(): Promise<FilingRecord[]> {
+  return (await request<{ filings: FilingRecord[] }>('/api/user/filings')).filings;
+}
+
+export async function createFiling(input: { domain: string; subjectName: string; subjectType?: 'enterprise' | 'individual'; icpNumber?: string }): Promise<FilingRecord> {
+  return (
+    await request<{ filing: FilingRecord }>('/api/user/filings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+  ).filing;
+}

@@ -7,7 +7,8 @@
 
 ## 一、数据模型设定（PostgreSQL 迁移 022）
 
-> 现有迁移到 `021` 为止（`packages/db/migrations/*.sql`）。本批新增 `022_agent_templates.sql`，全部使用 `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`，可重复执行，与既有迁移风格一致（BEGIN/COMMIT + CHECK 约束）。
+> 本批新增 `022_agent_templates.sql`，全部使用 `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`，可重复执行，与既有迁移风格一致（BEGIN/COMMIT + CHECK 约束）。
+> 注意：仓库实际基线为 `001_platform_mvp.sql`，`packages/db/migrations/` 累计为 001、022-029；本行早期稿中"现有迁移到 `021` 为止"仅是写作时的背景说明，不代表当前仓库状态（022 之后另由 023-029 补充会话、客户端资源、用户功能与引擎 RLS）。
 
 ### 1.1 新表：agent_templates（模板库）
 

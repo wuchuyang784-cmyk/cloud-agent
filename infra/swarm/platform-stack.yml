@@ -52,6 +52,22 @@ services:
       restart_policy:
         condition: on-failure
 
+  # Runtime Boundary 契约服务（docs/20 §4）：平台以共享密钥签名后调用。
+  # 真实引擎接入后，Boundary 按 envelope.agentId 解析 runtime_url 并转发；
+  # 当前未接引擎时仅校验信封并回 accepted。
+  runtime-boundary:
+    image: ${BAIRUI_PLATFORM_IMAGE:-bairui/platform-api:local}
+    command: ['node', 'src/runtime/boundary-server.mjs']
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: '8091'
+      RUNTIME_SHARED_SECRET: ${BAIRUI_RUNTIME_SHARED_SECRET:-local-only-change-this-secret}
+    networks: [bairui]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
   caddy:
     image: caddy:2-alpine
     ports:

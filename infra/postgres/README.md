@@ -1,8 +1,12 @@
 # 本地开发使用 PostgreSQL
 
 平台 API 已支持 PostgreSQL。准备好数据库后，使用迁移角色按顺序导入
-`001_platform_mvp.sql`、`022_agent_templates.sql`、`023_auth_sessions.sql` 和
-`024_worker_rls.sql`，然后为 API 和 Worker 服务设置同一个 `DATABASE_URL`。
+`packages/db/migrations/` 下的全部迁移：`001_platform_mvp.sql`、
+`022_agent_templates.sql`、`023_auth_sessions.sql`、`024_worker_rls.sql`、
+`025_client_resources.sql`、`026_conversation_messages.sql`、
+`027_client_resource_contents.sql`、`028_agent_user_features.sql` 和
+`029_agent_engine_rls.sql`（仓库基线无 002-021 号迁移），
+然后为 API 和 Worker 服务设置同一个 `DATABASE_URL`。
 
 应用连接建议使用已创建的非超级用户 `bairui_app`，连接目标为 `bairui` 数据库：
 
@@ -24,13 +28,18 @@ docker run --name bairui-postgres `
   -d postgres:17-alpine
 ```
 
-在仓库根目录导入数据库结构：
+在仓库根目录逐个导入数据库结构（示例导入 `001`）：
 
 ```powershell
-Get-Content packages/db/migrations/001_platform_mvp.sql | docker exec -i bairui-postgres psql -U bairui -d bairui
+docker cp packages/db/migrations/001_platform_mvp.sql bairui-postgres:/tmp/001.sql
+docker exec bairui-postgres psql -U bairui -d bairui -f /tmp/001.sql
 ```
 
-如果数据库不是 Docker 容器，请在 Navicat 中以迁移账号执行四个迁移文件，或使用
+其余迁移同样逐个执行（`022_agent_templates.sql` 至 `029_agent_engine_rls.sql`）。
+使用 `docker cp` + `psql -f` 可避免管道命令对中文注释的编码转码问题；迁移文件需为
+UTF-8（无 BOM）。
+
+如果数据库不是 Docker 容器，请在 Navicat 中以迁移账号执行九个迁移文件，或使用
 你现有的 PostgreSQL 客户端逐个执行。
 
 即使在本地 Swarm 环境运行，也要为 `BAIRUI_SESSION_SECRET` 使用随机生成的

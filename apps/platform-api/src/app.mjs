@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { MemoryStore } from './store.mjs';
 import { PostgresStore } from './postgres-store.mjs';
 import { DevAuth } from './auth.mjs';
-import { MockRuntime } from './runtime/mock-runtime.mjs';
+import { createRuntimeResolver } from './runtime/engines/registry.mjs';
 
 function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
@@ -54,6 +54,9 @@ function writeSse(response, event, data) {
 
 export const RESOURCE_KINDS = ['knowledge_base', 'skill', 'tool', 'plugin'];
 
+// 模拟 Runtime 计费单价：每次 Agent 对话调用固定扣费 10 分（0.1 元）。
+export const BILLING_CENTS_PER_CALL = 10;
+
 export function createApp(options = {}) {
   const devSeed = process.env.NODE_ENV === 'production' ? {} : {
     users: [{
@@ -103,7 +106,8 @@ export function createApp(options = {}) {
     : new MemoryStore({ ...options, seed: options.seed ?? devSeed }));
   const maxBodyBytes = options.maxBodyBytes ?? Number(process.env.BAIRUI_MAX_BODY_BYTES ?? 1024 * 1024);
   const auth = options.auth ?? new DevAuth(store, { ...options.authOptions, devUser: devSeed.users?.[0] });
-  const runtime = options.runtime ?? new MockRuntime(options.runtimeOptions);
+  const runtimeResolver = createRuntimeResolver({ env: options.env ?? process.env, runtimeOptions: options.runtimeOptions });
+  const runtime = options.runtime ?? runtimeResolver.resolve(options.engineKind ?? 'mock').runtime;
 
   const server = createServer(async (request, response) => {
     const requestId = getRequestId(request);
@@ -324,6 +328,7 @@ export function createApp(options = {}) {
           await store.addUsage(scope, usage.totalTokens, { agentId: agent.id, sessionId: session.id });
           if (assistantParts.length > 0) {
             await store.addMessage(scope, { sessionId: session.id, role: 'assistant', content: assistantParts.join('\n'), outputTokens: usage.totalTokens ?? 0 });
+            await store.chargeForUsage(scope, { agentId: agent.id, sessionId: session.id, amountCents: BILLING_CENTS_PER_CALL, description: 'Agent 对话调用 ×1（模拟 Runtime，0.1 元/次）' });
           }
         } catch (caught) {
           writeSse(response, 'run.failed', { code: 'runtime_error', requestId });
@@ -354,6 +359,123 @@ export function createApp(options = {}) {
           modelBreakdown: [],
           series: [],
         });
+      }
+
+      // ---------- 我的收藏 ----------
+      if (request.method === 'GET' && path === '/api/user/favorites') {
+        return sendJson(response, 200, { favorites: await store.listFavorites(scope) });
+      }
+
+      if (request.method === 'POST' && path === '/api/user/favorites') {
+        const input = await readJson(request, maxBodyBytes);
+        if (!['agent', 'resource'].includes(input.targetType) || typeof input.targetId !== 'string' || !input.targetId.trim()) {
+          return sendError(response, 422, 'validation_error', 'Favorite target type and id are required', requestId);
+        }
+        const favorite = await store.addFavorite(scope, input.targetType, input.targetId.trim());
+        if (!favorite) return sendError(response, 404, 'favorite_target_not_found', 'Favorite target not found', requestId);
+        return sendJson(response, 201, { favorite }, { location: '/api/user/favorites/' + favorite.id });
+      }
+
+      const favoriteMatch = path.match(/^\/api\/user\/favorites\/([^/]+)$/);
+      if (request.method === 'DELETE' && favoriteMatch) {
+        const removed = await store.removeFavorite(scope, favoriteMatch[1]);
+        if (!removed) return sendError(response, 404, 'favorite_not_found', 'Favorite not found', requestId);
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+
+      // ---------- 站内通知 ----------
+      if (request.method === 'GET' && path === '/api/user/notifications') {
+        const result = await store.listNotifications(scope);
+        return sendJson(response, 200, { notifications: result.notifications, unreadCount: result.unreadCount });
+      }
+
+      if (request.method === 'POST' && path === '/api/user/notifications/read-all') {
+        const updated = await store.markNotificationsRead(scope);
+        return sendJson(response, 200, { ok: true, updated });
+      }
+
+      const notificationMatch = path.match(/^\/api\/user\/notifications\/([^/]+)$/);
+      if (request.method === 'PATCH' && notificationMatch) {
+        const updated = await store.markNotificationsRead(scope, notificationMatch[1]);
+        if (updated === 0) return sendError(response, 404, 'notification_not_found', 'Notification not found', requestId);
+        return sendJson(response, 200, { ok: true, updated });
+      }
+
+      // ---------- 用户设置 ----------
+      if (request.method === 'GET' && path === '/api/user/settings') {
+        return sendJson(response, 200, { settings: await store.getSettings(scope) });
+      }
+
+      if (request.method === 'PATCH' && path === '/api/user/settings') {
+        const input = await readJson(request, maxBodyBytes);
+        const update = {};
+        if (input.displayName !== undefined) {
+          if (input.displayName !== null && typeof input.displayName !== 'string') {
+            return sendError(response, 422, 'validation_error', 'Display name must be a string', requestId);
+          }
+          update.displayName = typeof input.displayName === 'string' && input.displayName.trim() ? input.displayName.trim() : null;
+        }
+        if (input.prefs !== undefined) {
+          if (typeof input.prefs !== 'object' || input.prefs === null || Array.isArray(input.prefs)) {
+            return sendError(response, 422, 'validation_error', 'Prefs must be an object', requestId);
+          }
+          update.prefs = input.prefs;
+        }
+        if (Object.keys(update).length === 0) {
+          return sendError(response, 422, 'validation_error', 'No settings fields to update', requestId);
+        }
+        return sendJson(response, 200, { settings: await store.updateSettings(scope, update) });
+      }
+
+      // ---------- 费用中心 ----------
+      if (request.method === 'GET' && path === '/api/user/account') {
+        return sendJson(response, 200, { account: await store.getAccount(scope) });
+      }
+
+      if (request.method === 'GET' && path === '/api/user/billing/transactions') {
+        return sendJson(response, 200, { transactions: await store.listTransactions(scope) });
+      }
+
+      if (request.method === 'POST' && path === '/api/user/billing/recharge') {
+        const input = await readJson(request, maxBodyBytes);
+        if (!Number.isInteger(input.amountCents) || input.amountCents <= 0 || input.amountCents > 100_000_000) {
+          return sendError(response, 422, 'validation_error', 'Recharge amount must be a positive amount in cents', requestId);
+        }
+        if (input.remark !== undefined && typeof input.remark !== 'string') {
+          return sendError(response, 422, 'validation_error', 'Remark must be a string', requestId);
+        }
+        const transaction = await store.recharge(scope, { amountCents: input.amountCents, description: input.remark?.trim() || '账户充值' });
+        const account = await store.getAccount(scope);
+        return sendJson(response, 201, { transaction, account }, { location: '/api/user/billing/transactions/' + transaction.id });
+      }
+
+      // ---------- 备案 ----------
+      if (request.method === 'GET' && path === '/api/user/filings') {
+        return sendJson(response, 200, { filings: await store.listFilings(scope) });
+      }
+
+      if (request.method === 'POST' && path === '/api/user/filings') {
+        const input = await readJson(request, maxBodyBytes);
+        const domain = typeof input.domain === 'string' ? input.domain.trim() : '';
+        const subjectName = typeof input.subjectName === 'string' ? input.subjectName.trim() : '';
+        if (!domain || !subjectName || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(domain)) {
+          return sendError(response, 422, 'validation_error', 'Filing domain and subject name are required with a valid domain', requestId);
+        }
+        if (input.subjectType !== undefined && !['enterprise', 'individual'].includes(input.subjectType)) {
+          return sendError(response, 422, 'validation_error', 'Unsupported subject type', requestId);
+        }
+        if (input.icpNumber !== undefined && input.icpNumber !== null && typeof input.icpNumber !== 'string') {
+          return sendError(response, 422, 'validation_error', 'ICP number must be a string', requestId);
+        }
+        const filing = await store.createFiling(scope, {
+          domain,
+          subjectName,
+          subjectType: input.subjectType ?? 'enterprise',
+          icpNumber: typeof input.icpNumber === 'string' && input.icpNumber.trim() ? input.icpNumber.trim() : null,
+        });
+        return sendJson(response, 201, { filing }, { location: '/api/user/filings/' + filing.id });
       }
 
       return sendError(response, 404, 'not_found', 'Not found', requestId);

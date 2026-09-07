@@ -25,11 +25,10 @@ test('keeps the original MVP agent workspace navigation', () => {
   }
 
   const sidebar = source.slice(source.indexOf('<aside'), source.indexOf('</aside>') + '</aside>'.length);
-  const platformStatus = sidebar.indexOf('平台状态');
-  const resourceEntry = sidebar.indexOf('资源库', platformStatus);
   const workbench = sidebar.indexOf('工作台');
-  assert.ok(platformStatus >= 0, 'missing platform status section');
-  assert.ok(resourceEntry > platformStatus, 'resource library should be inside platform status');
+  const devDeploy = sidebar.indexOf('开发与部署');
+  const resourceEntry = sidebar.indexOf('资源库');
+  assert.ok(workbench >= 0, 'missing workbench section');
   assert.ok(resourceEntry > workbench, 'resource library should not be the workbench entry');
-  assert.equal(sidebar.slice(0, platformStatus).indexOf('资源库'), -1, 'resource library should not be in the workbench navigation');
+  assert.equal(sidebar.slice(workbench, devDeploy).indexOf('资源库'), -1, 'resource library should not be inside the workbench navigation group');
 });

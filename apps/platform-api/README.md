@@ -29,8 +29,11 @@ POST /api/auth/dev-login
 Agent、用量和 Outbox 都会持久化，API 可以扩展为多个副本。未设置
 `DATABASE_URL` 时才会回退到 `MemoryStore`，仅用于单进程开发测试。
 
-首次连接已有数据库时，按顺序导入 `001_platform_mvp.sql`、
-`022_agent_templates.sql`、`023_auth_sessions.sql` 和 `024_worker_rls.sql`。
+首次连接已有数据库时，按顺序导入 `packages/db/migrations/` 中的
+`001_platform_mvp.sql`、`022_agent_templates.sql`、`023_auth_sessions.sql`、
+`024_worker_rls.sql`、`025_client_resources.sql`、`026_conversation_messages.sql`、
+`027_client_resource_contents.sql`、`028_agent_user_features.sql` 与
+`029_agent_engine_rls.sql`（仓库基线无 002-021 号迁移）。
 应用账号建议使用非超级用户的 `bairui_app`，不要让平台 API 使用迁移管理员或
 PostgreSQL 超级用户。
 
@@ -58,8 +61,8 @@ npm run start:worker --prefix apps/platform-api
 
 ## 生产环境前置条件
 
-- 已导入 `packages/db/migrations/001_platform_mvp.sql` 的 PostgreSQL。
-- 已导入 `022`、`023`、`024` 迁移。
+- 已按顺序导入 `packages/db/migrations/` 全部迁移（001、022、023、024、025、
+  026、027、028、029）的 PostgreSQL。
 - API 和 Worker 使用同一个 `DATABASE_URL`。
 - `BAIRUI_SESSION_SECRET` 使用随机的至少 32 字符密钥。
 - 当前仍使用模拟 Runtime；它只用于平台 API 的开发验证。

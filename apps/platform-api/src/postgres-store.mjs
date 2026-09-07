@@ -53,6 +53,80 @@ function messageFromRow(row) {
   } : null;
 }
 
+function favoriteFromRow(row) {
+  return row ? {
+    id: row.id,
+    targetType: row.target_type,
+    targetId: row.target_id,
+    name: row.target_name ?? row.target_id,
+    status: row.target_status ?? null,
+    createdAt: new Date(row.created_at).toISOString(),
+  } : null;
+}
+
+function notificationFromRow(row) {
+  return row ? {
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    body: row.body ?? '',
+    isRead: row.is_read,
+    readAt: row.read_at ? new Date(row.read_at).toISOString() : null,
+    createdAt: new Date(row.created_at).toISOString(),
+  } : null;
+}
+
+function settingFromRow(row) {
+  return row ? {
+    organizationId: row.organization_id,
+    userId: row.user_id,
+    displayName: row.display_name ?? null,
+    prefs: row.prefs ?? {},
+    updatedAt: new Date(row.updated_at).toISOString(),
+  } : null;
+}
+
+function accountFromRow(row) {
+  return row ? {
+    organizationId: row.organization_id,
+    userId: row.user_id,
+    balanceCents: Number(row.balance_cents),
+    currency: row.currency,
+    updatedAt: new Date(row.updated_at).toISOString(),
+  } : null;
+}
+
+function transactionFromRow(row) {
+  return row ? {
+    id: row.id,
+    type: row.type,
+    amountCents: Number(row.amount_cents),
+    balanceAfterCents: Number(row.balance_after_cents),
+    referenceType: row.reference_type ?? null,
+    referenceId: row.reference_id ?? null,
+    description: row.description ?? null,
+    createdAt: new Date(row.created_at).toISOString(),
+  } : null;
+}
+
+function filingFromRow(row) {
+  return row ? {
+    id: row.id,
+    domain: row.domain,
+    subjectName: row.subject_name,
+    subjectType: row.subject_type,
+    icpNumber: row.icp_number ?? null,
+    status: row.status,
+    remark: row.remark ?? null,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  } : null;
+}
+
+function formatCents(cents) {
+  return (cents / 100).toFixed(2) + ' 元';
+}
+
 export class PostgresStore {
   constructor(options = {}) {
     this.pool = options.pool ?? new Pool({ connectionString: options.connectionString ?? process.env.DATABASE_URL, max: options.max ?? Number(process.env.BAIRUI_DB_POOL_MAX ?? 20), idleTimeoutMillis: options.idleTimeoutMillis ?? 30000, connectionTimeoutMillis: options.connectionTimeoutMillis ?? 5000 });
@@ -329,4 +403,179 @@ export class PostgresStore {
   async findAuthSession(id) { const r = await this.pool.query('SELECT id, user_id, expires_at FROM auth_sessions WHERE id = $1', [id]); const row = r.rows[0]; return row ? { id: row.id, userId: row.user_id, expiresAt: new Date(row.expires_at).getTime() } : null; }
   async touchAuthSession(id) { await this.pool.query('UPDATE auth_sessions SET last_seen_at = now() WHERE id = $1', [id]); }
   async deleteAuthSession(id) { await this.pool.query('DELETE FROM auth_sessions WHERE id = $1', [id]); }
+
+  // ---------- 我的收藏 ----------
+  async listFavorites(scope) {
+    return this.withScope(scope, async (c) => {
+      const r = await c.query(`SELECT f.id, f.target_type, f.target_id, f.created_at,
+          COALESCE(a.name, res.name) AS target_name,
+          CASE WHEN a.id IS NOT NULL THEN a.status ELSE res.status END AS target_status
+        FROM user_favorites f
+        LEFT JOIN agents a ON a.id = f.target_id AND a.organization_id = f.organization_id AND a.owner_user_id = f.user_id
+        LEFT JOIN client_resources res ON res.id = f.target_id AND res.organization_id = f.organization_id AND res.owner_user_id = f.user_id
+        WHERE f.organization_id = $1 AND f.user_id = $2 AND (a.id IS NOT NULL OR res.id IS NOT NULL)
+        ORDER BY f.created_at DESC, f.id DESC`, [scope.organizationId, scope.userId]);
+      return r.rows.map(favoriteFromRow);
+    });
+  }
+
+  async addFavorite(scope, targetType, targetId) {
+    return this.withScope(scope, async (c) => {
+      if (targetType === 'agent') {
+        const a = await c.query('SELECT 1 FROM agents WHERE id = $1 AND organization_id = $2 AND owner_user_id = $3', [targetId, scope.organizationId, scope.userId]);
+        if (!a.rows[0]) return null;
+      } else {
+        const res = await c.query('SELECT 1 FROM client_resources WHERE id = $1 AND organization_id = $2 AND owner_user_id = $3', [targetId, scope.organizationId, scope.userId]);
+        if (!res.rows[0]) return null;
+      }
+      const r = await c.query(`INSERT INTO user_favorites (id, organization_id, user_id, target_type, target_id)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (organization_id, user_id, target_type, target_id) DO NOTHING
+        RETURNING id`, ['fav-' + randomUUID(), scope.organizationId, scope.userId, targetType, targetId]);
+      const favoriteId = r.rows[0]?.id ?? (await c.query(`SELECT id FROM user_favorites WHERE organization_id = $1 AND user_id = $2 AND target_type = $3 AND target_id = $4`, [scope.organizationId, scope.userId, targetType, targetId])).rows[0].id;
+      const view = await c.query(`SELECT f.id, f.target_type, f.target_id, f.created_at,
+          COALESCE(a.name, res.name) AS target_name,
+          CASE WHEN a.id IS NOT NULL THEN a.status ELSE res.status END AS target_status
+        FROM user_favorites f
+        LEFT JOIN agents a ON a.id = f.target_id AND a.organization_id = f.organization_id AND a.owner_user_id = f.user_id
+        LEFT JOIN client_resources res ON res.id = f.target_id AND res.organization_id = f.organization_id AND res.owner_user_id = f.user_id
+        WHERE f.id = $1 AND f.organization_id = $2 AND f.user_id = $3`, [favoriteId, scope.organizationId, scope.userId]);
+      return favoriteFromRow(view.rows[0]);
+    });
+  }
+
+  async removeFavorite(scope, favoriteId) {
+    return this.withScope(scope, async (c) => {
+      const r = await c.query('DELETE FROM user_favorites WHERE id = $1 AND organization_id = $2 AND user_id = $3', [favoriteId, scope.organizationId, scope.userId]);
+      return r.rowCount > 0;
+    });
+  }
+
+  // ---------- 通知 ----------
+  async addNotification(scope, input = {}) {
+    return this.withScope(scope, async (c) => {
+      const r = await c.query(`INSERT INTO user_notifications (id, organization_id, user_id, type, title, body)
+        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        ['notify-' + randomUUID(), scope.organizationId, scope.userId, input.type ?? 'system', input.title ?? '通知', input.body ?? '']);
+      return notificationFromRow(r.rows[0]);
+    });
+  }
+
+  async listNotifications(scope) {
+    return this.withScope(scope, async (c) => {
+      const items = await c.query(`SELECT * FROM user_notifications
+        WHERE organization_id = $1 AND user_id = $2
+        ORDER BY created_at DESC, id DESC LIMIT 50`, [scope.organizationId, scope.userId]);
+      const unread = await c.query(`SELECT COUNT(*)::int AS count FROM user_notifications
+        WHERE organization_id = $1 AND user_id = $2 AND is_read = false`, [scope.organizationId, scope.userId]);
+      return { notifications: items.rows.map(notificationFromRow), unreadCount: unread.rows[0].count };
+    });
+  }
+
+  async markNotificationsRead(scope, notificationId = null) {
+    return this.withScope(scope, async (c) => {
+      const r = await c.query(`UPDATE user_notifications SET is_read = true, read_at = now()
+        WHERE organization_id = $1 AND user_id = $2 AND ($3::text IS NULL OR id = $3) AND is_read = false`,
+        [scope.organizationId, scope.userId, notificationId]);
+      return r.rowCount;
+    });
+  }
+
+  // ---------- 设置 ----------
+  async getSettings(scope) {
+    return this.withScope(scope, async (c) => {
+      await c.query(`INSERT INTO user_settings (organization_id, user_id) VALUES ($1, $2) ON CONFLICT (organization_id, user_id) DO NOTHING`, [scope.organizationId, scope.userId]);
+      const r = await c.query('SELECT * FROM user_settings WHERE organization_id = $1 AND user_id = $2', [scope.organizationId, scope.userId]);
+      return settingFromRow(r.rows[0]);
+    });
+  }
+
+  async updateSettings(scope, input = {}) {
+    return this.withScope(scope, async (c) => {
+      await c.query(`INSERT INTO user_settings (organization_id, user_id) VALUES ($1, $2) ON CONFLICT (organization_id, user_id) DO NOTHING`, [scope.organizationId, scope.userId]);
+      const sets = ['updated_at = now()'];
+      const values = [scope.organizationId, scope.userId];
+      if (input.displayName !== undefined) {
+        sets.push('display_name = $' + (values.length + 1));
+        values.push(input.displayName ?? null);
+      }
+      if (input.prefs !== undefined) {
+        sets.push(`prefs = COALESCE(prefs, '{}'::jsonb) || $` + (values.length + 1) + '::jsonb');
+        values.push(JSON.stringify(input.prefs ?? {}));
+      }
+      const r = await c.query('UPDATE user_settings SET ' + sets.join(', ') + ' WHERE organization_id = $1 AND user_id = $2 RETURNING *', values);
+      return settingFromRow(r.rows[0]);
+    });
+  }
+
+  // ---------- 费用中心 ----------
+  async #upsertAccount(c, organizationId, userId) {
+    await c.query('INSERT INTO user_accounts (organization_id, user_id) VALUES ($1, $2) ON CONFLICT (organization_id, user_id) DO NOTHING', [organizationId, userId]);
+    const r = await c.query('SELECT * FROM user_accounts WHERE organization_id = $1 AND user_id = $2', [organizationId, userId]);
+    return accountFromRow(r.rows[0]);
+  }
+
+  async getAccount(scope) {
+    return this.withScope(scope, async (c) => this.#upsertAccount(c, scope.organizationId, scope.userId));
+  }
+
+  async listTransactions(scope, limit = 100) {
+    return this.withScope(scope, async (c) => {
+      const r = await c.query(`SELECT * FROM account_transactions
+        WHERE organization_id = $1 AND user_id = $2
+        ORDER BY created_at DESC, id DESC LIMIT $3`, [scope.organizationId, scope.userId, limit]);
+      return r.rows.map(transactionFromRow);
+    });
+  }
+
+  async recharge(scope, input = {}) {
+    return this.withScope(scope, async (c) => {
+      const account = await this.#upsertAccount(c, scope.organizationId, scope.userId);
+      const after = account.balanceCents + input.amountCents;
+      await c.query('UPDATE user_accounts SET balance_cents = $3, updated_at = now() WHERE organization_id = $1 AND user_id = $2', [scope.organizationId, scope.userId, after]);
+      const r = await c.query(`INSERT INTO account_transactions (id, organization_id, user_id, type, amount_cents, balance_after_cents, description)
+        VALUES ($1, $2, $3, 'recharge', $4, $5, $6) RETURNING *`,
+        ['tx-' + randomUUID(), scope.organizationId, scope.userId, input.amountCents, after, input.description ?? '账户充值']);
+      await c.query(`INSERT INTO user_notifications (id, organization_id, user_id, type, title, body) VALUES ($1, $2, $3, 'billing', $4, $5)`,
+        ['notify-' + randomUUID(), scope.organizationId, scope.userId, '充值成功', '账户到账 ' + formatCents(input.amountCents) + '，当前余额 ' + formatCents(after) + '。']);
+      return transactionFromRow(r.rows[0]);
+    });
+  }
+
+  async chargeForUsage(scope, input = {}) {
+    return this.withScope(scope, async (c) => {
+      const account = await this.#upsertAccount(c, scope.organizationId, scope.userId);
+      const after = account.balanceCents - input.amountCents;
+      await c.query('UPDATE user_accounts SET balance_cents = $3, updated_at = now() WHERE organization_id = $1 AND user_id = $2', [scope.organizationId, scope.userId, after]);
+      const r = await c.query(`INSERT INTO account_transactions (id, organization_id, user_id, type, amount_cents, balance_after_cents, reference_type, reference_id, description)
+        VALUES ($1, $2, $3, 'consume', $4, $5, $6, $7, $8) RETURNING *`,
+        ['tx-' + randomUUID(), scope.organizationId, scope.userId, input.amountCents, after, input.agentId ? 'agent' : null, input.agentId ?? null, input.description ?? 'Agent 调用扣费']);
+      if (after < 0) {
+        await c.query(`INSERT INTO user_notifications (id, organization_id, user_id, type, title, body) VALUES ($1, $2, $3, 'billing', $4, $5)`,
+          ['notify-' + randomUUID(), scope.organizationId, scope.userId, '账户余额不足', '扣费后余额为 ' + formatCents(after) + '，请及时充值以免影响 Agent 服务。']);
+      }
+      return transactionFromRow(r.rows[0]);
+    });
+  }
+
+  // ---------- 备案 ----------
+  async listFilings(scope) {
+    return this.withScope(scope, async (c) => {
+      const r = await c.query(`SELECT * FROM icp_filings
+        WHERE organization_id = $1 AND owner_user_id = $2
+        ORDER BY created_at DESC, id DESC`, [scope.organizationId, scope.userId]);
+      return r.rows.map(filingFromRow);
+    });
+  }
+
+  async createFiling(scope, input = {}) {
+    return this.withScope(scope, async (c) => {
+      const r = await c.query(`INSERT INTO icp_filings (id, organization_id, owner_user_id, domain, subject_name, subject_type, icp_number, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'submitted') RETURNING *`,
+        ['filing-' + randomUUID(), scope.organizationId, scope.userId, input.domain, input.subjectName, input.subjectType ?? 'enterprise', input.icpNumber ?? null]);
+      await c.query(`INSERT INTO user_notifications (id, organization_id, user_id, type, title, body) VALUES ($1, $2, $3, 'system', $4, $5)`,
+        ['notify-' + randomUUID(), scope.organizationId, scope.userId, '备案提交成功', '域名「' + input.domain + '」的备案申请已提交，状态为审核中。']);
+      return filingFromRow(r.rows[0]);
+    });
+  }
 }
