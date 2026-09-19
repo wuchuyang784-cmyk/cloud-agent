@@ -9,6 +9,27 @@ export class MemoryStore {
   constructor(options = {}) {
     const seed = options.seed ?? {};
     this.users = new Map((seed.users ?? []).map((user) => [user.id, { ...user }]));
+    // 组织与成员关系：内存实现同样维护，保证与 Postgres 分支行为一致，
+    // 并为多组织能力提供统一的读取入口（listUserOrganizations）。
+    this.organizations = new Map();
+    this.memberships = new Map();
+    this.agentMemberships = new Map();
+    for (const user of seed.users ?? []) {
+      if (!user.organizationId) continue;
+      const seededAt = new Date().toISOString();
+      this.organizations.set(user.organizationId, {
+        id: user.organizationId,
+        name: user.organizationName ?? user.organizationId,
+        kind: user.organizationKind ?? 'personal',
+        createdAt: seededAt,
+      });
+      this.memberships.set(user.organizationId + ':' + user.id, {
+        organizationId: user.organizationId,
+        userId: user.id,
+        role: user.role ?? 'user',
+        createdAt: seededAt,
+      });
+    }
     this.agents = new Map((seed.agents ?? []).map((agent) => [agent.id, {
       status: 'provisioning',
       createdAt: new Date().toISOString(),
@@ -50,6 +71,62 @@ export class MemoryStore {
 
   findUser(userId) {
     return clone(this.users.get(userId));
+  }
+
+  ensureIdentityUser(input) {
+    if (!input.subject || !input.email) throw new Error('invalid_identity');
+    const existing = [...this.users.values()].find(user => user.authSubject === input.subject);
+    if (existing) return clone(existing);
+    if (this.findUserByEmail(input.email)) throw new Error('identity_link_required');
+    const user = this.createUserWithOrganization({ email: input.email, displayName: input.displayName });
+    this.users.get(user.id).authSubject = input.subject;
+    return this.findUser(user.id);
+  }
+
+  // 注册：原子创建个人组织、用户与组织成员关系。邮箱已存在返回 null。
+  // 个人组织是真实组织，未来升级为团队时只需追加成员，无需迁移业务数据。
+  createUserWithOrganization(input) {
+    const email = String(input.email ?? '').trim().toLowerCase();
+    if (!email || this.findUserByEmail(email)) return null;
+    const now = new Date().toISOString();
+    const organizationId = input.organizationId ?? 'org-' + randomUUID();
+    const userId = input.userId ?? 'user-' + randomUUID();
+    this.organizations.set(organizationId, {
+      id: organizationId,
+      name: input.organizationName ?? email,
+      kind: 'personal',
+      createdAt: now,
+    });
+    this.users.set(userId, {
+      id: userId,
+      email,
+      displayName: input.displayName ?? null,
+      passwordHash: input.passwordHash,
+      organizationId,
+      role: 'org_admin',
+    });
+    this.memberships.set(organizationId + ':' + userId, {
+      organizationId,
+      userId,
+      role: 'org_admin',
+      createdAt: now,
+    });
+    return this.findUser(userId);
+  }
+
+  // 返回用户所属的全部组织（多组织预留：当前长度为 1）。
+  listUserOrganizations(userId) {
+    return clone([...this.memberships.values()]
+      .filter((membership) => membership.userId === userId)
+      .map((membership) => {
+        const organization = this.organizations.get(membership.organizationId);
+        return {
+          id: membership.organizationId,
+          name: organization?.name ?? membership.organizationId,
+          kind: organization?.kind ?? 'personal',
+          role: membership.role,
+        };
+      }));
   }
 
   listAgents(scope) {
@@ -139,6 +216,9 @@ export class MemoryStore {
       organizationId: scope.organizationId,
       ownerUserId: scope.userId,
       name: input.name ?? 'New agent',
+      engine: input.engine ?? 'mock',
+      templateId: input.templateId ?? null,
+      templateVersion: input.templateVersion ?? null,
       status: 'provisioning',
       runtimeUrl: null,
       host: agentHost(input.id ?? 'pending'),
@@ -147,6 +227,15 @@ export class MemoryStore {
     };
     agent.host = agentHost(agent.id);
     this.agents.set(agent.id, agent);
+    // 同步写入 Agent 成员关系：个人租户阶段只有 owner 一行，
+    // 未来组织内协作时按 role（owner/operator/viewer）扩展授权。
+    this.agentMemberships.set(agent.id + ':' + scope.userId, {
+      organizationId: scope.organizationId,
+      agentId: agent.id,
+      userId: scope.userId,
+      role: 'owner',
+      createdAt: now,
+    });
     this.outbox.push({ id: randomUUID(), type: 'agent.provision', aggregateId: agent.id, status: 'pending', createdAt: now });
     return clone(this.#viewAgent(agent));
   }

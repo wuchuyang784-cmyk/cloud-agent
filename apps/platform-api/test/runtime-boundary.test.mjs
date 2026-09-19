@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 
 import { signRequest, envelopeHeaders, verifyEnvelope } from '../src/runtime/boundary-envelope.mjs';
 import { createBoundaryServer } from '../src/runtime/boundary-server.mjs';
@@ -107,3 +108,75 @@ test('boundary server：合法信封 accepted，无/错签名 401，healthz 免�
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('boundary server：实例已解析且 operation=chat 时转发到 runtime_url', async () => {
+  // 伪造引擎实例 upstream
+  const upstream = createBoundaryServerUpstream({ secret: SECRET });
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  const server = createBoundaryServer({
+    secret: SECRET,
+    resolveRuntimeUrl: async (agentId) => 'http://127.0.0.1:' + upstream.address().port,
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const chatBody = JSON.stringify({ ...JSON.parse(BODY), operation: 'chat', agentId: 'agent-pi-live', prompt: '你好' });
+    const response = await fetch('http://127.0.0.1:' + server.address().port + '/v1/runtime/operations', {
+      method: 'POST',
+      headers: { ...envelopeHeaders({ secret: SECRET, body: chatBody }), 'content-type': 'application/json' },
+      body: chatBody,
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.status, 'completed');
+    assert.ok(String(payload.forwardedTo).includes('127.0.0.1'));
+    assert.equal(payload.upstream.content, '你好，boundary 已转发');
+    assert.equal(payload.upstream.totalTokens, 7);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => upstream.close(resolve));
+  }
+});
+
+test('boundary server：实例未解析时 accepted 且 reason=engine_not_routed', async () => {
+  const server = createBoundaryServer({ secret: SECRET, resolveRuntimeUrl: async () => null });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await fetch('http://127.0.0.1:' + server.address().port + '/v1/runtime/streams', {
+      method: 'POST',
+      headers: { ...envelopeHeaders({ secret: SECRET, body: BODY }), 'content-type': 'application/json' },
+      body: BODY,
+    });
+    assert.equal(response.status, 202);
+    const payload = await response.json();
+    assert.equal(payload.status, 'accepted');
+    assert.equal(payload.reason, 'engine_not_routed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// 测试用的轻量 upstream：校验信封后回执固定回复，行为与 pi wrapper 一致。
+function createBoundaryServerUpstream({ secret }) {
+  return createServer((request, response) => {
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const verification = verifyEnvelope({
+        secret,
+        timestamp: request.headers['x-bairui-timestamp'],
+        nonce: request.headers['x-bairui-nonce'],
+        signature: request.headers['x-bairui-signature'],
+        body: raw,
+      });
+      if (!verification.ok) {
+        response.writeHead(401, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'envelope_invalid', code: verification.error }));
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ content: '你好，boundary 已转发', totalTokens: 7 }));
+    });
+  });
+}
+

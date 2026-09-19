@@ -219,35 +219,42 @@ export interface EngineAdapter {
 
 ### 3.1 引擎基线镜像（新增）
 
+> **上游现状提醒**：pi 与 dsh **均无官方发布镜像**（pi 仅有 Plain Docker 样例与第三方 sbx kit；dsh 仓库内无 Dockerfile/containerization 指引）。两镜像都须自建，且引擎版本必须 lock——镜像侧实现以子模块 pin 为构建基线，完整源码级事实见 **`31-agent-engines-upstream-audit.md`**。
+
 | 镜像 | 内容 | 对应引擎 |
 | --- | --- | --- |
-| `bairui-agent-pi` | `pi-agent-core` headless + 平台注入侧 + 托管 UI 壳 | pi |
-| `bairui-agent-dsh` | `dsh`（web/headless profile）+ 平台注入侧 | dsh |
+| `bairui-agent-pi` | `pi` CLI（`-p` / json-event / rpc-entry 挂载点）的平台注入侧 wrapper + 托管 UI 壳 | pi |
+| `bairui-agent-dsh` | `dsh` CLI（`web`/`headless` profile）+ 平台注入侧 wrapper | dsh |
 
 构建参数：`ENGINE_IMAGE_TAG`（对应 `27` 号 P1 里程碑）。镜像由 `bairui-agent` 仓 CI 构建推送，平台 infra 引用。
 
 ### 3.2 环境变量注入契约（每实例）
 
+> **两层模型**：平台 spawn env（下表）**全部是镜像内 wrapper 的输入**，不是引擎自身读取的变量（pi 无 `PI_API_KEY` 这类启动 env；dsh 也不读 `DSH_*` 业务变量）。wrapper 负责把它们翻译为引擎真实消费形式（真实 provider env / `~/.pi/agent` auth 存储 / `$DSH_HOME/profiles/<name>` + cordis 配置）。逐项映射与上游证据见 **`31` 号 §5/§3/§4**。
+
 平台 spawn 时按引擎注入（全部来自 `agents.settings` 解析 + 密钥封套引用，明文不落库）：
 
 ```
-公共（两引擎一致）：
+公共（两引擎一致，wrapper 输入）：
   AGENT_ID=<agent_id>
   AGENT_ENGINE=pi|dsh
   SUBDOMAIN=agent-<id>.bairui.app
   RUNTIME_URL=http://<container>:<port>      # 内部回传
   RUNTIME_SHARED_SECRET=<shared_secret>      # 与平台通信鉴权（25 号 / 12 号）
   TEMPLATE_MANIFEST=<manifest json>          # 27 号 §3.1 渲染后（密钥为引用）
-pi：
-  PI_PROVIDER=<deepseek|claude|openai>
-  PI_MODEL=<model>
-  PI_API_KEY=<key>                            # 来自封套解密，仅注入运行时
-dsh：
-  DSH_PROFILE=web|headless
-  DSH_PRESET=<preset>
-  DSH_BUNDLE=<bundle-ref>                     # 可选
-  DSH_MODEL_ADAPTER=<deepseek|claude|openai>
-  DSH_API_KEY=<key>
+pi（wrapper 输入 → pi 真实消费）：
+  PI_PROVIDER=<deepseek|claude|openai>       # 仅 wrapper 内部选模型，pi 不读
+  PI_MODEL=<model>                            # 仅 wrapper 内部选模型，pi 不读
+  # 真实 provider key：wrapper 以 DEEPSEEK_API_KEY / OPENAI_API_KEY /
+  # ANTHROPIC_API_KEY（或写 ~/.pi/agent auth 存储）注入，禁止发明 PI_API_KEY
+dsh（wrapper 输入 → dsh 真实消费）：
+  DSH_PROFILE=web|headless                   # wrapper 选 profile 模板（内置 web/headless/sdk/acp）
+  DSH_PRESET=<preset>                         # wrapper 落成 profile bundles/cordis patch 层
+  DSH_BUNDLE=<bundle-ref>                     # 可选，同上（dsh.profile.bundles）
+  DSH_TELEMETRY_MODE=DISABLED                 # 镜像默认必须显式 DISABLED：base bundle 默认
+                                              # FEEDBACK_ONLY 会上传用户反馈（零外发要求，见 31 号 §4.3）
+  # 真实侧：wrapper 物化 $DSH_HOME/profiles/<name> 并把卷作为 $DSH_HOME；
+  # provider key 以 spawn env DEEPSEEK_API_KEY 注入（llm-deepseek 默认 apiKeyEnv，见 31 号 §4.4）
 ```
 
 ### 3.3 docker-compose 扩展
@@ -259,6 +266,41 @@ dsh：
 ### 3.4 网关路由设定（不变，补 engine 维度）
 
 网关按 `Host: agent-{id}.bairui.app` 取 `{id}` → 查 `agents.engine` + `agent_engine_runs` 最新 `runtime_url` → 反代。域名、TLS、鉴权完全沿用 `25` 号 §3.1/§3.2。
+
+### 3.5 P1 实现状态（pi 已实装；dsh 待接入）
+
+> 本节记录 §3.1–§3.4 的**代码落地现状**，随实现推进更新；规格本身仍以上述各节为准。
+
+已落地：
+
+- **引擎值域**：`agents.engine` 取 `mock|pi|dsh`，默认 `mock`（迁移 `packages/db/migrations/030_agent_engine_mock_default.sql`；`store.createAgent` / `postgres-store` 同步落列并校验值域，非法值返回 `unsupported_engine` / `422`）。
+- **前端**：控制台“创建 Agent”弹窗可选引擎（`mock`/`pi`/`dsh`），创建请求携带 `engine`（`apps/console-mvp/src/api.ts`、`App.tsx`）。
+- **运行时解析**：`createRuntimeResolver` 按 `agent.engine` 解析 adapter 并**缓存实例**（避免多次 resolve 丢失 spawn/health 状态）；`app.mjs`（对话 + 异步 provision）与 `worker` 均按 agent 解析运行时。
+- **pi adapter**：`apps/platform-api/src/runtime/engines/pi-engine.mjs`，双形态二选一——docker（`BAIRUI_ENGINE_PI_IMAGE`，`docker run -d` + 端口映射）或 local（`BAIRUI_PI_LOCAL=1`，本机 `node wrapper.mjs`）；实现 `canRun/spawn/provision/health/route/stop/streamChat` 契约。
+- **pi wrapper**：`apps/platform-api/src/runtime/pi/wrapper.mjs`，常驻 `pi --mode rpc --no-session` 子进程，对外 `GET /healthz` 与 `POST /v1/tasks`；对话以平台信封头签名下发，wrapper 侧做 HMAC/时间窗/nonce 校验（与 `boundary-envelope.mjs` 同算法）。
+- **基线镜像**：`apps/platform-api/docker/pi/Dockerfile`（`node:24-bookworm-slim` + `npm i -g --ignore-scripts @earendil-works/pi-coding-agent` + wrapper）。
+- **Boundary 转发**：`runtime/boundary-server.mjs` 支持注入 `resolveRuntimeUrl(agentId)`，对 `operation=chat` 以信封签名转发到实例 `/v1/tasks` 并回传结果；实例未路由时回执 `accepted` 且 `reason=engine_not_routed`。
+- **编排**：`infra/swarm/platform-stack.yml` 为 worker/boundary 注入 pi 相关 env；`infra/caddy/Caddyfile` 保留 `*.localhost` 经 platform-api 鉴权后由 adapter 下发的路径。
+
+验收状态（2026-09-11）：
+
+- 后端 `npm test --prefix apps/platform-api` **45 项全绿**，新增覆盖：pi wrapper 集成（信封校验/转发/usage）、pi adapter 契约单测、**adapter→wrapper→pi RPC 端到端**（local 形态，fake pi CLI，免 Docker/免真实 key）。
+- `bairui-agent-pi:0.85.1` 镜像**构建成功**；容器 `/healthz` 返回健康；容器内 `pi` 0.85.1 实跑，缺 provider key 时返回明确错误（`No API key found…`），证明 wrapper→pi RPC 链路通。
+- 受限网络（无法直连 docker.io）构建需覆盖基础镜像与 npm registry：
+
+  ```powershell
+  docker build -f apps/platform-api/docker/pi/Dockerfile `
+    --build-arg NODE_IMAGE=docker.m.daocloud.io/library/node:24-bookworm-slim `
+    --build-arg NPM_REGISTRY=https://registry.npmmirror.com `
+    -t bairui-agent-pi:0.85.1 .
+  ```
+
+待办：
+
+1. 真实 provider key（`DEEPSEEK_API_KEY` 等）下的 LLM 对话端到端验收（本机无 key，未做）。
+2. dsh 按同模式接入（adapter + wrapper + `bairui-agent-dsh` 镜像）。
+3. Swarm 形态下 worker 挂载 `docker.sock` 以 `docker run`/`docker service create` 动态拉起实例。
+4. 网关侧实现 `agentId → agent_engine_runs.runtime_url` 解析并注入 Boundary。
 
 ## 四、模型与凭证设定
 

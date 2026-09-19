@@ -1,3 +1,22 @@
+# 运行时配置必须让 api 与 worker 保持一致：
+#   - worker 负责 provision（经 RuntimeDriver 拉起实例）；
+#   - api 负责对话（按 agent.runtimeUrl 直连实例，并用同一共享密钥做信封签名）。
+# 两边不一致会出现「provision 用了真引擎、对话却回退 mock」，或信封验签 401。
+#
+# docs/32 §3.1：实例不再由平台 `docker run` 拉起，也不再挂载宿主 docker.sock ——
+# 挂 docker.sock 等于把宿主 Docker 的完全控制权交给该服务，此做法已废弃。
+#   - local  ：本机子进程（开发 / CI），需 BAIRUI_PI_LOCAL=1；
+#   - remote ：实例由外部编排系统拉起，平台经 BAIRUI_RUNTIME_ORCHESTRATOR_URL
+#              请求拉起并登记 runtimeUrl（生产形态）。
+x-runtime-env: &runtime-env
+  RUNTIME_SHARED_SECRET: ${BAIRUI_RUNTIME_SHARED_SECRET:-local-only-change-this-secret}
+  BAIRUI_RUNTIME_DRIVER: ${BAIRUI_RUNTIME_DRIVER:-local}
+  BAIRUI_RUNTIME_ORCHESTRATOR_URL: ${BAIRUI_RUNTIME_ORCHESTRATOR_URL:-}
+  BAIRUI_PI_LOCAL: ${BAIRUI_PI_LOCAL:-0}
+  BAIRUI_PI_MODEL: ${BAIRUI_PI_MODEL:-}
+  # pi 只读真实 provider key env（docs/31 §4.4），由平台透传给实例。
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+
 services:
   platform-api:
     image: ${BAIRUI_PLATFORM_IMAGE:-bairui/platform-api:local}
@@ -5,7 +24,12 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: '8080'
       BAIRUI_SESSION_SECRET: ${BAIRUI_SESSION_SECRET:-local-only-change-this-secret}
+      # 执行 032 迁移后，显式切换 better-auth；不自动迁移旧账号。
+      BAIRUI_AUTH_MODE: ${BAIRUI_AUTH_MODE:-local}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must point to PostgreSQL}
+      <<: *runtime-env
     networks: [bairui]
     deploy:
       # P0 使用进程内存保存会话和 Outbox 记录。
@@ -31,6 +55,12 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must point to PostgreSQL}
+      # 真实引擎接入（P1，docs/27）：agent.engine=pi 时按 agent 解析到
+      # PiEngineAdapter。实例拉起由 RuntimeDriver 承担（docs/32 §3.1）：
+      # 开发形态 BAIRUI_RUNTIME_DRIVER=local + BAIRUI_PI_LOCAL=1（本机 wrapper 子进程）；
+      # 生产形态 BAIRUI_RUNTIME_DRIVER=remote，由外部编排按镜像拉起并回传 runtimeUrl，
+      # 平台不接触宿主 docker daemon。
+      <<: *runtime-env
     networks: [bairui]
     deploy:
       replicas: 1
@@ -52,9 +82,10 @@ services:
       restart_policy:
         condition: on-failure
 
-  # Runtime Boundary 契约服务（docs/20 §4）：平台以共享密钥签名后调用。
-  # 真实引擎接入后，Boundary 按 envelope.agentId 解析 runtime_url 并转发；
-  # 当前未接引擎时仅校验信封并回 accepted。
+  # Runtime Boundary 信封网关（docs/20 §4）：平台以共享密钥签名后调用。
+  # 已实现按 agentId 解析 runtime_url 并将 operation=chat 信封转发到实例
+  # （见 boundary-server.mjs 的 resolveRuntimeUrl 注入点）；网关集成方需在此
+  # 提供 agentId -> agent_engine_runs.runtime_url 的解析实现。
   runtime-boundary:
     image: ${BAIRUI_PLATFORM_IMAGE:-bairui/platform-api:local}
     command: ['node', 'src/runtime/boundary-server.mjs']
@@ -71,10 +102,13 @@ services:
   caddy:
     image: caddy:2-alpine
     ports:
+      # Docker Desktop（Windows/WSL2 后端）下 swarm 的 mode: host 会把端口绑在
+      # WSL 虚拟机内部，Windows 侧 com.docker.backend 的转发无法到达，表现为
+      # 连接建立后 "Empty reply from server"。本地开发统一使用 ingress 路由网格。
       - target: 80
         published: 80
         protocol: tcp
-        mode: host
+        mode: ingress
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile

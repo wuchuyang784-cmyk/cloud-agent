@@ -18,10 +18,17 @@ export function createRuntimeResolver(options = {}) {
     dsh: () => new DshEngineAdapter({ env }),
   };
 
+  // 每个 engine 缓存同一 adapter 实例，保证 spawn/stop/health 等状态（实例表、运行记录）
+  // 在多次 resolve 之间不丢失。
+  const instances = new Map();
+
   const getAdapter = (kind) => {
+    if (instances.has(kind)) return instances.get(kind);
     const entry = factories[kind];
     if (entry === undefined) return null;
-    return typeof entry === 'function' ? entry() : entry;
+    const instance = typeof entry === 'function' ? entry() : entry;
+    instances.set(kind, instance);
+    return instance;
   };
 
   const resolveMock = () => getAdapter('mock');

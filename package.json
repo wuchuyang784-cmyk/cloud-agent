@@ -1,0 +1,28 @@
+{
+  "name": "bairui-cloud-agent-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BaiRui Cloud Agent Platform 根目录脚本：一键启动本地开发环境",
+  "scripts": {
+    "monitor:up": "node scripts/monitoring.mjs up",
+    "monitor:status": "node scripts/monitoring.mjs status",
+    "monitor:stop": "node scripts/monitoring.mjs stop",
+    "monitor:alerts": "node scripts/monitoring.mjs alerts",
+    "monitor:password": "node scripts/monitoring.mjs password",
+    "test:monitoring:config": "node --test scripts/monitoring-config.test.mjs scripts/monitoring.test.mjs",
+    "test:monitoring:rules": "node scripts/monitoring-rules.test.mjs",
+    "test:monitoring": "node scripts/test-monitoring.mjs",
+    "preprod:up": "node scripts/preprod.mjs up",
+    "preprod:status": "node scripts/preprod.mjs status",
+    "preprod:stop": "node scripts/preprod.mjs stop",
+    "test:preprod:config": "node --test scripts/preprod-config.test.mjs apps/platform-api/test/service-lifecycle.test.mjs apps/platform-api/test/secret-env.test.mjs apps/platform-api/test/postgres-transactions.test.mjs",
+    "test:preprod": "node scripts/test-preprod.mjs",
+    "test:platform": "node scripts/test-scheduler.mjs --platform",
+    "test:scheduler": "node scripts/test-scheduler.mjs",
+    "test:scheduler:swarm": "node --test scripts/swarm-scheduler-config.test.mjs && node scripts/test-scheduler-swarm.mjs",
+    "setup:env": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup-env.ps1",
+    "dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev.ps1",
+    "dev:api": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev.ps1 -Target api",
+    "dev:web": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev.ps1 -Target web"
+  }
+}

@@ -13,7 +13,7 @@
 
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { verifyEnvelope } from './boundary-envelope.mjs';
+import { envelopeHeaders, verifyEnvelope } from './boundary-envelope.mjs';
 
 const RUNTIME_PATHS = new Set(['/v1/runtime/operations', '/v1/runtime/streams']);
 
@@ -38,6 +38,10 @@ export function createBoundaryServer(options = {}) {
   const secret = options.secret ?? process.env.RUNTIME_SHARED_SECRET ?? 'local-only-change-this-secret';
   const nonceWindowMs = options.nonceWindowMs ?? 5 * 60 * 1000;
   const seenNonces = options.seenNonces ?? new Set();
+  // 注入 runtime_url 解析器（默认查 agent_engine_runs/runtime_routes 的接入方实现），
+  // 由网关层（infra/caddy）或集成方在构造时提供。
+  const resolveRuntimeUrl = options.resolveRuntimeUrl ?? (async () => null);
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://boundary.local');
@@ -78,15 +82,59 @@ export function createBoundaryServer(options = {}) {
       return json(response, 422, { error: 'envelope_required', code: 'missing_operation_or_agent_id' });
     }
 
-    // TODO(engine)：按 envelope.agentId 解析 agent_engine_runs.runtime_url，将
-    // operation 转发到对应引擎实例（HTTP/SSE），并把引擎响应原样回传。
+    // 按 envelope.agentId 解析引擎实例 runtime_url（agent_engine_runs / runtime_routes），
+    // 将 operation 转发到对应实例；实例未解析时仅回执 accepted（平台侧可轮询路由表）。
+    let runtimeUrl = null;
+    let resolveError = null;
+    try {
+      runtimeUrl = await resolveRuntimeUrl(envelope.agentId);
+    } catch (error) {
+      resolveError = error.message;
+    }
+
+    if (runtimeUrl && envelope.operation === 'chat') {
+      const chatBody = { prompt: envelope.prompt, reset: envelope.reset ?? true };
+      const chatRaw = JSON.stringify(chatBody);
+      const chatHeaders = envelopeHeaders({ secret, body: chatRaw });
+      try {
+        const upstream = await fetchImpl(runtimeUrl.replace(/\/$/, '') + '/v1/tasks', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...chatHeaders },
+          body: chatRaw,
+        });
+        const rawUpstream = await upstream.text();
+        let parsedUpstream = null;
+        try { parsedUpstream = JSON.parse(rawUpstream); } catch { /* keep raw */ }
+        return json(response, upstream.ok ? 200 : 502, {
+          status: upstream.ok ? 'completed' : 'upstream_error',
+          traceId: envelope.traceId ?? null,
+          agentId: envelope.agentId,
+          operation: envelope.operation,
+          engine: envelope.engine ?? 'unknown',
+          forwardedTo: runtimeUrl,
+          upstreamStatus: upstream.status,
+          upstream: parsedUpstream ?? { raw: rawUpstream.slice(0, 2000) },
+        });
+      } catch (error) {
+        return json(response, 502, {
+          status: 'forward_failed',
+          error: String(error?.message ?? error),
+          traceId: envelope.traceId ?? null,
+          agentId: envelope.agentId,
+          operation: envelope.operation,
+          forwardedTo: runtimeUrl,
+        });
+      }
+    }
+
     return json(response, 202, {
       status: 'accepted',
       traceId: envelope.traceId ?? null,
       agentId: envelope.agentId,
       operation: envelope.operation,
       engine: envelope.engine ?? 'unknown',
-      forwardedTo: null,
+      forwardedTo: runtimeUrl,
+      reason: runtimeUrl ? 'operation_not_forwardable' : resolveError ? 'engine_resolve_error' : 'engine_not_routed',
     });
   });
 
@@ -95,6 +143,8 @@ export function createBoundaryServer(options = {}) {
 
 // 直接运行时启动：npm run start:boundary --prefix apps/platform-api
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const { assertAgentRuntimeEnabled } = await import('../platform-config.mjs');
+  assertAgentRuntimeEnabled();
   const port = Number(process.env.PORT ?? 8091);
   const server = createBoundaryServer();
   server.listen(port, '0.0.0.0', () => console.log('runtime-boundary listening on :' + port));

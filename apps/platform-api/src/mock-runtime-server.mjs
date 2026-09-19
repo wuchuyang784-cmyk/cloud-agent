@@ -1,4 +1,7 @@
 import { createServer } from 'node:http';
+import { assertAgentRuntimeEnabled } from './platform-config.mjs';
+
+assertAgentRuntimeEnabled();
 
 function json(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });

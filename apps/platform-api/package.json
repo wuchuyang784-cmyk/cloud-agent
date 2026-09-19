@@ -3,13 +3,18 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start:simulation-worker": "node --env-file-if-exists=../../.env src/scheduler/worker-index.mjs",
     "test": "node --test",
-    "start": "node src/index.mjs",
-    "start:runtime": "node src/mock-runtime-server.mjs",
-    "start:boundary": "node src/runtime/boundary-server.mjs",
-    "start:worker": "node src/worker-index.mjs"
+    "start": "node --env-file-if-exists=../../.env src/index.mjs",
+    "start:runtime": "node --env-file-if-exists=../../.env src/mock-runtime-server.mjs",
+    "start:boundary": "node --env-file-if-exists=../../.env src/runtime/boundary-server.mjs",
+    "start:worker": "node --env-file-if-exists=../../.env src/worker-index.mjs"
   },
   "dependencies": {
-    "pg": "^8.23.0"
+    "better-auth": "1.7.5",
+    "kysely": "0.29.6",
+    "pg": "^8.23.0",
+    "prom-client": "15.1.3",
+    "proxy-addr": "2.0.7"
   }
 }
