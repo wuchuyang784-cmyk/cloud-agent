@@ -2,8 +2,16 @@ import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import { MemoryStore } from './store.mjs';
 import { PostgresStore } from './postgres-store.mjs';
-import { DevAuth } from './auth.mjs';
+import { createPrincipalResolver } from './auth/resolver.mjs';
 import { createRuntimeResolver } from './runtime/engines/registry.mjs';
+import { MemoryTaskStore, PostgresTaskStore, TaskError } from './scheduler/task-store.mjs';
+import { platformCapabilities, validatePlatformStartup, disabledCapability } from './platform-config.mjs';
+import { createReadiness } from './service-lifecycle.mjs';
+import { createTelemetry, metricsConfiguration } from './observability/metrics.mjs';
+import { routeLabel } from './observability/labels.mjs';
+import { safeLog } from './observability/safe-log.mjs';
+import { handleAdmin } from './admin/routes.mjs';
+import { handleClientMonitoring } from './monitoring/client-routes.mjs';
 
 function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
@@ -30,8 +38,8 @@ async function readJson(request, maxBytes = 1024 * 1024) {
   }
 }
 
-function getRequestId(request) {
-  return request.headers['x-request-id'] || 'req_' + randomUUID();
+function getRequestId() {
+  return 'req_' + randomUUID();
 }
 
 function requestHash(input) {
@@ -52,13 +60,30 @@ function writeSse(response, event, data) {
   response.write('data: ' + JSON.stringify(data) + '\n\n');
 }
 
+// 口令登录处理：dev 替身与本地账号都实现了 login，因此两种模式共用同一入口。
+async function handlePasswordLogin(auth, request, response, maxBodyBytes, requestId) {
+  const input = await readJson(request, maxBodyBytes);
+  const result = await auth.login(input.email, input.password);
+  if (!result) return sendError(response, 401, 'invalid_credentials', 'Invalid email or password', requestId);
+  return sendJson(response, 200, { user: result.user }, { 'set-cookie': auth.cookie(result.token) });
+}
+
 export const RESOURCE_KINDS = ['knowledge_base', 'skill', 'tool', 'plugin'];
 
 // 模拟 Runtime 计费单价：每次 Agent 对话调用固定扣费 10 分（0.1 元）。
 export const BILLING_CENTS_PER_CALL = 10;
 
+// 注册入口的基础校验：邮箱形态与最小口令长度（仅拦截空/极弱口令，不做强度评分）。
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const MIN_PASSWORD_LENGTH = 8;
+
 export function createApp(options = {}) {
-  const devSeed = process.env.NODE_ENV === 'production' ? {} : {
+  const env = options.env ?? process.env;
+  const capabilities = platformCapabilities(env);
+  const injectedTest = env.NODE_ENV === 'test' && (options.store || options.auth || options.authOptions?.betterAuthDatabase);
+  if (!injectedTest) validatePlatformStartup(env);
+  const metricsConfig = metricsConfiguration(env);
+  const devSeed = env.NODE_ENV === 'production' || env.BAIRUI_AUTH_MODE === 'better-auth' ? {} : {
     users: [{
       id: 'dev-user',
       email: process.env.BAIRUI_DEV_EMAIL ?? 'dev@example.test',
@@ -101,39 +126,101 @@ export function createApp(options = {}) {
       },
     ],
   };
-  const store = options.store ?? (process.env.DATABASE_URL
-    ? new PostgresStore(options.databaseOptions)
+  const store = options.store ?? (env.DATABASE_URL
+    ? new PostgresStore({ connectionString: env.DATABASE_URL, ...options.databaseOptions })
     : new MemoryStore({ ...options, seed: options.seed ?? devSeed }));
-  const maxBodyBytes = options.maxBodyBytes ?? Number(process.env.BAIRUI_MAX_BODY_BYTES ?? 1024 * 1024);
-  const auth = options.auth ?? new DevAuth(store, { ...options.authOptions, devUser: devSeed.users?.[0] });
-  const runtimeResolver = createRuntimeResolver({ env: options.env ?? process.env, runtimeOptions: options.runtimeOptions });
-  const runtime = options.runtime ?? runtimeResolver.resolve(options.engineKind ?? 'mock').runtime;
+  const maxBodyBytes = options.maxBodyBytes ?? Number(env.BAIRUI_MAX_BODY_BYTES ?? 1024 * 1024);
+  // 身份解析统一走 PrincipalResolver 工厂（docs/30 §4.1）：开发期是受限替身，
+  // 接入正式身份提供方时只替换工厂实现，路由与业务代码不变。
+  const auth = options.auth ?? createPrincipalResolver(store, {
+    env: options.env ?? process.env,
+    ...options.authOptions,
+    devUser: devSeed.users?.[0],
+  });
+  if (capabilities.mode === 'platform' && !injectedTest && (!(store instanceof PostgresStore) || auth.provider !== 'better-auth')) {
+    throw new Error('Platform mode requires PostgreSQL and Better Auth');
+  }
+  const runtimeResolver = capabilities.agentExecution ? createRuntimeResolver({ env, runtimeOptions: options.runtimeOptions }) : null;
+  // 全局 fallback runtime（options.runtime 注入用于测试与旧调用路径）。
+  const runtime = capabilities.agentExecution ? (options.runtime ?? runtimeResolver.resolve(options.engineKind ?? 'mock').runtime) : null;
+  // 真实对话与后台 provisioning 按 agent.engine 动态解析对应引擎运行时。
+  const getRuntimeFor = (agent) => {
+    if (!capabilities.agentExecution) throw new Error('agent_runtime_disabled');
+    return options.runtime ?? runtimeResolver.resolve(agent?.engine ?? 'mock').runtime;
+  };
+  const simulationEnabled = env.BAIRUI_SIMULATION_ENABLED === '1' && env.NODE_ENV !== 'production';
+  if (simulationEnabled && !env.BETTER_AUTH_URL) throw new Error('Simulation API requires BETTER_AUTH_URL');
+  const simulationUsers = new Set((env.BAIRUI_SIMULATION_USERS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
+  const tasks = simulationEnabled ? (options.taskStore ?? (store instanceof PostgresStore ? new PostgresTaskStore(store.pool) : new MemoryTaskStore())) : null;
+  const ready = createReadiness(store, options.readinessTimeoutMs ?? 2000);
+  const telemetry = createTelemetry(metricsConfig, store, { readinessTimeoutMs: options.metricsReadinessTimeoutMs });
+  let draining = false;
 
   const server = createServer(async (request, response) => {
-    const requestId = getRequestId(request);
+    telemetry.observeRequest(request, response);
+    const requestId = getRequestId();
     response.setHeader('x-request-id', requestId);
-    const url = new URL(request.url, 'http://platform.local');
-    const path = url.pathname;
-    const principal = await auth.resolve(request);
-    const scope = principal && { userId: principal.userId, organizationId: principal.organizationId };
-
     try {
-      if (request.method === 'GET' && path === '/healthz') {
-        try {
-          await store.ping?.();
-          return sendJson(response, 200, { status: 'ok', database: process.env.DATABASE_URL ? 'postgres' : 'memory' });
-        } catch (error) {
-          console.error(error);
-          return sendError(response, 503, 'database_unavailable', 'Database unavailable', requestId);
+      const url = new URL(request.url, 'http://platform.local');
+      const path = url.pathname;
+      if (path.startsWith('/api/admin/') || path.startsWith('/api/user/monitoring/')) response.setHeader('cache-control', 'no-store');
+      if (request.method === 'GET' && ['/livez', '/readyz', '/healthz'].includes(path)) {
+        response.setHeader('cache-control', 'no-store');
+        if (path === '/livez') return sendJson(response, 200, { status: 'ok' });
+        if (draining) return sendError(response, 503, 'service_draining', 'Service draining', requestId);
+        if (!await ready() || draining) return sendError(response, 503, 'database_unavailable', 'Database unavailable', requestId);
+        return sendJson(response, 200, { status: 'ok', database: store instanceof PostgresStore ? 'postgres' : 'memory' });
+      }
+      if (draining) {
+        response.setHeader('cache-control', 'no-store');
+        response.setHeader('retry-after', '1');
+        return sendError(response, 503, 'service_draining', 'Service draining', requestId);
+      }
+      if (request.method === 'GET' && path === '/api/auth/config') {
+        return sendJson(response, 200, { provider: auth.provider ?? 'local', capabilities }, { 'cache-control': 'no-store' });
+      }
+      if (auth.handle && path.startsWith('/api/auth/') && path !== '/api/auth/me') {
+        return await auth.handle(request, response, path, maxBodyBytes);
+      }
+      const principal = await auth.resolve(request);
+      const scope = principal && { userId: principal.userId, organizationId: principal.organizationId };
+
+      // 注册：创建个人组织与账号并直接签发会话。生产环境同样可用，
+      // 是 local 身份模式下的主入口（dev-login 仅在非生产环境开放）。
+      if (request.method === 'POST' && path === '/api/auth/register') {
+        if (typeof auth.register !== 'function') {
+          return sendError(response, 404, 'not_found', 'Not found', requestId);
         }
+        const input = await readJson(request, maxBodyBytes);
+        const email = typeof input.email === 'string' ? input.email.trim() : '';
+        const password = typeof input.password === 'string' ? input.password : '';
+        if (!EMAIL_PATTERN.test(email)) {
+          return sendError(response, 422, 'validation_error', 'A valid email is required', requestId);
+        }
+        if (password.length < MIN_PASSWORD_LENGTH) {
+          return sendError(response, 422, 'validation_error', `Password must be at least ${MIN_PASSWORD_LENGTH} characters`, requestId);
+        }
+        if (input.displayName !== undefined && input.displayName !== null && typeof input.displayName !== 'string') {
+          return sendError(response, 422, 'validation_error', 'Display name must be a string', requestId);
+        }
+        const result = await auth.register({
+          email,
+          password,
+          displayName: typeof input.displayName === 'string' && input.displayName.trim() ? input.displayName.trim() : null,
+        });
+        if (!result) return sendError(response, 409, 'email_taken', 'Email is already registered', requestId);
+        return sendJson(response, 201, { user: result.user }, { 'set-cookie': auth.cookie(result.token) });
       }
 
+      // 规范登录端点：所有身份模式共用，生产环境同样开放。
+      if (request.method === 'POST' && path === '/api/auth/login') {
+        return handlePasswordLogin(auth, request, response, maxBodyBytes, requestId);
+      }
+
+      // 兼容别名：仅非生产环境开放，历史上是本地开发的唯一登录入口。
       if (request.method === 'POST' && path === '/api/auth/dev-login') {
-        if (process.env.NODE_ENV === 'production') return sendError(response, 404, 'not_found', 'Not found', requestId);
-        const input = await readJson(request, maxBodyBytes);
-        const result = await auth.login(input.email, input.password);
-        if (!result) return sendError(response, 401, 'invalid_credentials', 'Invalid email or password', requestId);
-        return sendJson(response, 200, { user: result.user }, { 'set-cookie': auth.cookie(result.token) });
+        if (env.NODE_ENV === 'production') return sendError(response, 404, 'not_found', 'Not found', requestId);
+        return handlePasswordLogin(auth, request, response, maxBodyBytes, requestId);
       }
 
       if (request.method === 'POST' && path === '/api/auth/logout') {
@@ -147,7 +234,37 @@ export function createApp(options = {}) {
           : sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
       }
 
+      if (path.startsWith('/api/admin/')) {
+        return await handleAdmin({ request, response, url, principal, store,
+          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId });
+      }
       if (!principal) return sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
+
+      if (path.startsWith('/api/user/monitoring/')) {
+        return await handleClientMonitoring({ request, response, url, scope, store, sendJson, sendError, requestId });
+      }
+
+      const disabled = disabledCapability(capabilities, request.method, path);
+      if (disabled) return sendError(response, 403, 'capability_disabled', 'Capability unavailable: ' + disabled, requestId);
+
+      if (path === '/api/simulation/tasks' || path.startsWith('/api/simulation/tasks/')) {
+        if (!tasks || !simulationUsers.has(principal.email?.toLowerCase())) return sendError(response, 404, 'not_found', 'Not found', requestId);
+        if (request.method !== 'GET' && request.headers.origin !== env.BETTER_AUTH_URL) return sendError(response, 403, 'origin_rejected', 'Origin rejected', requestId);
+        if (path === '/api/simulation/tasks') {
+          if (request.method === 'GET') return sendJson(response, 200, { tasks: await tasks.list(scope) });
+          if (request.method === 'POST') {
+            const input = await readJson(request, 4096);
+            if (!input || Array.isArray(input) || typeof input !== 'object' || Object.keys(input).some(key => !['durationMs', 'outcome'].includes(key))) throw new TaskError('invalid_task');
+            return sendJson(response, 201, { task: await tasks.submit(scope, request.headers['idempotency-key'], input) });
+          }
+        }
+        const match = path.match(/^\/api\/simulation\/tasks\/([a-zA-Z0-9-]+)(\/cancel)?$/);
+        if (match && ((request.method === 'GET' && !match[2]) || (request.method === 'POST' && match[2]))) {
+          const task = match[2] ? await tasks.cancel(scope, match[1]) : await tasks.get(scope, match[1]);
+          return task ? sendJson(response, 200, { task }) : sendError(response, 404, 'not_found', 'Not found', requestId);
+        }
+        return sendError(response, 404, 'not_found', 'Not found', requestId);
+      }
 
       if (request.method === 'GET' && path === '/api/user/resources') {
         const kind = url.searchParams.get('kind') || undefined;
@@ -251,6 +368,10 @@ export function createApp(options = {}) {
         if (typeof input.name !== 'string' || input.name.trim().length === 0) {
           return sendError(response, 422, 'validation_error', 'Agent name is required', requestId);
         }
+        const engine = input.engine === undefined ? 'mock' : String(input.engine);
+        if (!['mock', 'pi', 'dsh'].includes(engine)) {
+          return sendError(response, 422, 'validation_error', 'Unsupported engine', requestId);
+        }
         const idempotencyKey = request.headers['idempotency-key'];
         const bodyHash = requestHash(input);
         if (idempotencyKey) {
@@ -260,15 +381,17 @@ export function createApp(options = {}) {
           }
           if (previous) return sendJson(response, previous.status, previous.body, { ...previous.headers, location: previous.headers?.location ?? '/api/user/agents/' + previous.body.agent.id });
         }
-        const agent = await store.createAgent(scope, { name: input.name.trim() });
+        const agent = await store.createAgent(scope, { name: input.name.trim(), engine });
         const body = { agent: await store.findAgent(scope, agent.id) };
         const headers = { location: '/api/user/agents/' + agent.id };
         if (idempotencyKey) await store.setIdempotency(scope, idempotencyKey, { requestHash: bodyHash, status: 202, body, headers });
         if (!store.claimOutbox) setTimeout(async () => {
           try {
-            const provisioned = await runtime.provision(agent);
+            const provisioned = await getRuntimeFor(agent).provision(agent);
             await store.markAgentReady(agent.id, provisioned.runtimeUrl);
-          } catch (caught) { console.error(caught); }
+          } catch {
+            safeLog('runtime_provision_error', { requestId, method: request.method, route: routeLabel(request.url) });
+          }
         }, 0).unref?.();
         return sendJson(response, 202, body, headers);
       }
@@ -317,7 +440,7 @@ export function createApp(options = {}) {
         try {
           await store.addMessage(scope, { sessionId: session.id, role: 'user', content: input.message.trim() });
           const assistantParts = [];
-          const usage = await runtime.streamChat({
+          const usage = await getRuntimeFor(agent).streamChat({
             agent,
             message: input.message.trim(),
             writeEvent: (event, data) => {
@@ -328,7 +451,8 @@ export function createApp(options = {}) {
           await store.addUsage(scope, usage.totalTokens, { agentId: agent.id, sessionId: session.id });
           if (assistantParts.length > 0) {
             await store.addMessage(scope, { sessionId: session.id, role: 'assistant', content: assistantParts.join('\n'), outputTokens: usage.totalTokens ?? 0 });
-            await store.chargeForUsage(scope, { agentId: agent.id, sessionId: session.id, amountCents: BILLING_CENTS_PER_CALL, description: 'Agent 对话调用 ×1（模拟 Runtime，0.1 元/次）' });
+            const chargeLabel = agent.engine && agent.engine !== 'mock' ? `${agent.engine} 引擎` : '模拟 Runtime';
+            await store.chargeForUsage(scope, { agentId: agent.id, sessionId: session.id, amountCents: BILLING_CENTS_PER_CALL, description: `Agent 对话调用 ×1（${chargeLabel}，0.1 元/次）` });
           }
         } catch (caught) {
           writeSse(response, 'run.failed', { code: 'runtime_error', requestId });
@@ -480,13 +604,20 @@ export function createApp(options = {}) {
 
       return sendError(response, 404, 'not_found', 'Not found', requestId);
     } catch (caught) {
+      if (caught.message === 'invalid_client_ip') return sendError(response, 400, 'invalid_client_ip', 'Invalid client address', requestId);
+      if (caught instanceof TaskError) return sendError(response, caught.code === 'queue_full' ? 429 : caught.code === 'idempotency_conflict' ? 409 : 422, caught.code, caught.code, requestId);
+      if (caught.message === 'identity_link_required') return sendError(response, 409, 'identity_link_required', 'Account migration requires verified identity linking', requestId);
       if (caught.message === 'invalid_json') return sendError(response, 400, 'invalid_json', 'Request body must be valid JSON', requestId);
       if (caught.message === 'payload_too_large') return sendError(response, 413, 'payload_too_large', 'Request body is too large', requestId);
-      console.error(caught);
+      safeLog('http_request_error', { requestId, method: request.method, route: routeLabel(request.url), status: 500 });
       return sendError(response, 500, 'internal_error', 'Internal server error', requestId);
     }
   });
 
-  server.platform = { store, auth, runtime };
+  server.once('close', () => { void telemetry.close(); });
+  server.platform = { store, auth, runtime, capabilities, telemetry, beginShutdown() {
+    draining = true;
+    void telemetry.close();
+  } };
   return server;
 }

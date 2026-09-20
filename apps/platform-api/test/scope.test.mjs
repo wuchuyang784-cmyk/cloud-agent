@@ -5,6 +5,7 @@ import { createApp } from '../src/app.mjs';
 
 async function withApp(run) {
   const app = createApp({
+    env: { NODE_ENV: 'test', BAIRUI_PLATFORM_MODE: 'legacy' },
     seed: {
       users: [
         { id: 'user-a', email: 'a@example.test', password: 'password-a', organizationId: 'org-a', role: 'user' },
@@ -71,7 +72,7 @@ test('user endpoints reject requests without a principal', async () => {
 });
 
 test('local startup provides a development principal', async () => {
-  const app = createApp();
+  const app = createApp({ env: { NODE_ENV: 'test', BAIRUI_PLATFORM_MODE: 'legacy' } });
   const server = app.listen(0);
   try {
     await new Promise((resolve) => server.once('listening', resolve));

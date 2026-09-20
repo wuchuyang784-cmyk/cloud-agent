@@ -8,7 +8,14 @@ export default defineConfig(({ mode }) => {
   return {
   plugins: [react(), tailwindcss()],
   server: {
+    host: '127.0.0.1',
+    port: 5173,
+    strictPort: true,
     proxy: {
+      '/admin': {
+        target: 'http://127.0.0.1:' + (env.ADMIN_CONSOLE_PORT || '5174'),
+        ws: true,
+      },
       '/api': {
         target: env.API_TARGET || 'http://127.0.0.1:8080',
         changeOrigin: true,

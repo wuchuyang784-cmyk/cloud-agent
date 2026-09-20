@@ -1,13 +1,22 @@
 {
-  auto_https off
-  admin off
+	auto_https off
+	admin off
 }
 
-localhost {
-  reverse_proxy platform-api:8080
+# 站点必须显式写 http:// scheme。裸主机名（如 localhost）会被 Caddy 当作 https
+# 站点，只在容器内监听 443，导致 swarm 发布的 80 端口无人监听，客户端表现为
+# 连接建立后 "Empty reply from server"。
+http://localhost {
+	reverse_proxy platform-api:8080
 }
 
-*.localhost {
-  # P0 阶段将 Agent 主机名保留在平台认证边界之后。
-  reverse_proxy platform-api:8080
+http://boundary.localhost {
+	# Runtime Boundary 信封网关（docs/20 §4 / docs/28 §2.2）：POST /v1/runtime/operations | /v1/runtime/streams
+	reverse_proxy runtime-boundary:8091
+}
+
+http://*.localhost {
+	# Agent 主机名保留在平台认证边界之后：请求经 platform-api 鉴权后由
+	# 对应引擎 adapter 以信封签名下发到实例（pi wrapper 容器）。
+	reverse_proxy platform-api:8080
 }

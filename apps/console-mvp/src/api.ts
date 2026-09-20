@@ -1,14 +1,44 @@
+export interface Organization {
+  id: string;
+  name: string;
+  kind: string;
+  role: string;
+}
+
+export interface PlatformCapabilities {
+  mode: 'platform' | 'legacy';
+  agentLifecycle: boolean;
+  agentExecution: boolean;
+  simulatedRecharge: boolean;
+}
+
+export const CLOSED_CAPABILITIES: PlatformCapabilities = Object.freeze({
+  mode: 'platform', agentLifecycle: false, agentExecution: false, simulatedRecharge: false,
+});
+
+export async function fetchCapabilities(): Promise<PlatformCapabilities> {
+  const { capabilities } = await request<{ capabilities?: PlatformCapabilities }>('/api/auth/config', { cache: 'no-store' });
+  if (!capabilities || !['platform', 'legacy'].includes(capabilities.mode)
+    || ['agentLifecycle', 'agentExecution', 'simulatedRecharge'].some(key => typeof capabilities[key as keyof PlatformCapabilities] !== 'boolean')
+    || (capabilities.mode === 'platform' && (capabilities.agentLifecycle || capabilities.agentExecution || capabilities.simulatedRecharge))) {
+    throw new Error('平台能力配置不可用，相关操作已关闭');
+  }
+  return capabilities;
+}
+
 export interface User {
   userId: string;
   organizationId: string;
   role: string;
   email: string;
+  organizations?: Organization[];
 }
 
 export interface BackendAgent {
   id: string;
   name: string;
   status: string;
+  engine?: string;
   runtimeKind?: string;
   host?: string;
   runtimeUrl?: string | null;
@@ -91,11 +121,44 @@ export interface UsagePayload {
   series: unknown[];
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE || '';
-const DEV_EMAIL = import.meta.env.VITE_DEV_EMAIL || 'dev@example.test';
-const DEV_PASSWORD = import.meta.env.VITE_DEV_PASSWORD || 'dev-password-change-me';
+export type MonitoringRange = 'today' | '7d' | '30d';
+export interface MonitoredAgent {
+  id: string;
+  name: string;
+  engine: string;
+  recordStatus: string;
+  recordUpdatedAt: string | null;
+  routeRecord: { source: 'lifecycle_record'; health: string; recordedAt: string | null;
+    freshness: 'missing' | 'recent' | 'stale' | 'invalid'; staleAfterSeconds: number };
+}
+export interface MonitoringPage { fetchedAt: string; items: MonitoredAgent[]; nextCursor: string | null }
+export interface MonitoringSummary {
+  events: number | null; calls: number | null; failedCalls: number | null; tokens: number | null;
+  latencySamples: number | null; avgLatencyMs: number | null; successRate: null;
+}
+export interface AgentMonitoring {
+  fetchedAt: string;
+  agent: MonitoredAgent;
+  live: { status: 'not_connected'; sampledAt: null; cpuPercent: null; memoryBytes: null };
+  usage: { range: MonitoringRange; timezone: string; from: string; to: string; source: 'usage_events';
+    coverage: 'recorded_only'; lastRecordedAt: string | null; summary: MonitoringSummary;
+    series: Array<MonitoringSummary & { day: string }> };
+}
 
-type ApiError = Error & { status?: number };
+export function fetchMonitoredAgents(q: string, after: string | undefined, signal: AbortSignal): Promise<MonitoringPage> {
+  const params = new URLSearchParams({ limit: '20' });
+  if (q) params.set('q', q);
+  if (after) params.set('after', after);
+  return request('/api/user/monitoring/agents?' + params, { signal, cache: 'no-store' });
+}
+
+export function fetchAgentMonitoring(id: string, range: MonitoringRange, signal: AbortSignal): Promise<AgentMonitoring> {
+  return request('/api/user/monitoring/agents/' + encodeURIComponent(id) + '?range=' + range, { signal, cache: 'no-store' });
+}
+
+const API_BASE = import.meta.env.VITE_API_BASE || '';
+
+export type ApiError = Error & { status?: number; code?: string };
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(API_BASE + path, {
@@ -105,15 +168,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   });
 
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('bairui:session-expired'));
+    }
     let message = String(response.status) + ' ' + response.statusText;
+    let code: string | undefined;
     try {
-      const body = (await response.json()) as { error?: { message?: string } };
-      message = body.error?.message || message;
+      const body = (await response.json()) as { error?: { code?: string; message?: string }; code?: string; message?: string };
+      message = body.error?.message || body.message || message;
+      code = body.error?.code || body.code;
     } catch {
       // Keep the HTTP status when the server did not return JSON.
     }
     const error = new Error(message) as ApiError;
     error.status = response.status;
+    if (code) error.code = code;
     throw error;
   }
 
@@ -162,27 +231,67 @@ export async function fetchHealth(): Promise<{ status: string; database: string 
   return request<{ status: string; database: string }>('/healthz');
 }
 
-export async function ensureDevSession(): Promise<User> {
+// 读取当前会话。未登录（401）返回 null，其他错误继续抛出，避免把网络故障误判成"未登录"。
+export async function fetchCurrentUser(): Promise<User | null> {
   try {
     return (await request<{ user: User }>('/api/auth/me')).user;
   } catch (error) {
-    if ((error as ApiError).status !== 401) throw error;
+    if ((error as ApiError).status === 401) return null;
+    throw error;
   }
+}
 
+export async function loginAccount(email: string, password: string): Promise<User> {
+  const config = await request<{ provider: string }>('/api/auth/config');
+  if (config.provider === 'better-auth') {
+    await request('/api/auth/sign-in/email', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }),
+    });
+    return (await request<{ user: User }>('/api/auth/me')).user;
+  }
   return (
-    await request<{ user: User }>('/api/auth/dev-login', {
+    await request<{ user: User }>('/api/auth/login', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: DEV_EMAIL, password: DEV_PASSWORD }),
+      body: JSON.stringify({ email, password }),
     })
   ).user;
+}
+
+export async function registerAccount(input: {
+  email: string;
+  password: string;
+  displayName?: string;
+}): Promise<User> {
+  const config = await request<{ provider: string }>('/api/auth/config');
+  if (config.provider === 'better-auth') {
+    await request('/api/auth/sign-up/email', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: input.email, password: input.password, name: input.displayName || input.email.split('@')[0] }),
+    });
+    return (await request<{ user: User }>('/api/auth/me')).user;
+  }
+  return (
+    await request<{ user: User }>('/api/auth/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+  ).user;
+}
+
+export async function logoutAccount(): Promise<void> {
+  const config = await request<{ provider: string }>('/api/auth/config');
+  await request(config.provider === 'better-auth' ? '/api/auth/sign-out' : '/api/auth/logout', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  });
 }
 
 export async function fetchAgents(): Promise<BackendAgent[]> {
   return (await request<{ agents: BackendAgent[] }>('/api/user/agents')).agents;
 }
 
-export async function createAgent(name: string): Promise<BackendAgent> {
+export async function createAgent(name: string, engine: string = 'mock'): Promise<BackendAgent> {
   return (
     await request<{ agent: BackendAgent }>('/api/user/agents', {
       method: 'POST',
@@ -190,7 +299,7 @@ export async function createAgent(name: string): Promise<BackendAgent> {
         'content-type': 'application/json',
         'idempotency-key': 'console-create-' + crypto.randomUUID(),
       },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, engine }),
     })
   ).agent;
 }

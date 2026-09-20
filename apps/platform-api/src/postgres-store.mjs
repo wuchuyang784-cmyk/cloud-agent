@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { agentHost } from './agent-host.mjs';
+import { rollbackForRelease } from './postgres-transaction.mjs';
 
 function userFromRow(row) {
   return row ? { id: row.id, email: row.email, passwordHash: row.password_hash ?? undefined, organizationId: row.organization_id, role: row.role ?? 'user' } : null;
@@ -129,8 +130,10 @@ function formatCents(cents) {
 
 export class PostgresStore {
   constructor(options = {}) {
-    this.pool = options.pool ?? new Pool({ connectionString: options.connectionString ?? process.env.DATABASE_URL, max: options.max ?? Number(process.env.BAIRUI_DB_POOL_MAX ?? 20), idleTimeoutMillis: options.idleTimeoutMillis ?? 30000, connectionTimeoutMillis: options.connectionTimeoutMillis ?? 5000 });
+    this.pool = options.pool ?? new Pool({ connectionString: options.connectionString ?? process.env.DATABASE_URL, max: options.max ?? Number(process.env.BAIRUI_DB_POOL_MAX ?? 20), idleTimeoutMillis: options.idleTimeoutMillis ?? 30000, connectionTimeoutMillis: options.connectionTimeoutMillis ?? 5000, query_timeout: options.queryTimeoutMillis, statement_timeout: options.queryTimeoutMillis });
     this.ownsPool = !options.pool;
+    // Idle sockets can fail during database restart; pg removes them from the pool.
+    if (this.ownsPool) this.pool.on('error', () => console.error('postgres_pool_idle_connection_error'));
   }
 
   async ping() { return (await this.pool.query('SELECT 1 AS ok')).rows[0]; }
@@ -160,16 +163,97 @@ export class PostgresStore {
     return userFromRow(r.rows[0]);
   }
 
+  async ensureIdentityUser(input) {
+    if (!input.subject || !input.email) throw new Error('invalid_identity');
+    const email = input.email.trim().toLowerCase();
+    const client = await this.pool.connect();
+    let releaseError;
+    try {
+      await client.query('BEGIN');
+      // Serialize first access across API replicas; identity and membership commit together.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [input.subject]);
+      const existing = await client.query(
+        'SELECT id FROM users WHERE auth_subject = $1', [input.subject]);
+      if (existing.rows[0]) {
+        const result = await client.query(
+          'SELECT u.id, u.email, om.organization_id, om.role FROM users u JOIN organization_members om ON om.user_id = u.id WHERE u.id = $1 ORDER BY om.created_at LIMIT 1',
+          [existing.rows[0].id]);
+        if (!result.rows[0]) throw new Error('identity_membership_missing');
+        await client.query('COMMIT');
+        return userFromRow(result.rows[0]);
+      }
+      const collision = await client.query('SELECT id FROM users WHERE lower(email) = lower($1)', [email]);
+      if (collision.rows[0]) throw new Error('identity_link_required');
+      const userId = 'user-' + randomUUID();
+      const organizationId = 'org-' + randomUUID();
+      await client.query('INSERT INTO organizations (id, name, kind) VALUES ($1, $2, $3)',
+        [organizationId, email.split('@')[0], 'personal']);
+      await client.query('INSERT INTO users (id, email, display_name, auth_subject) VALUES ($1, $2, $3, $4)',
+        [userId, email, input.displayName ?? null, input.subject]);
+      await client.query("INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'org_admin')", [organizationId, userId]);
+      await client.query('COMMIT');
+      return { id: userId, email, organizationId, role: 'org_admin' };
+    } catch (error) {
+      releaseError = await rollbackForRelease(client);
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
+  // 返回用户所属的全部组织（多组织预留：当前长度为 1）。
+  // organizations / organization_members 不启用 RLS，因此无需 scope 上下文。
+  async listUserOrganizations(userId) {
+    const r = await this.pool.query(`SELECT o.id, o.name, o.kind, om.role
+      FROM organization_members om JOIN organizations o ON o.id = om.organization_id
+      WHERE om.user_id = $1 ORDER BY om.created_at, o.id`, [userId]);
+    return r.rows.map((row) => ({ id: row.id, name: row.name, kind: row.kind, role: row.role }));
+  }
+
+  // 注册：在同一事务内创建个人组织、用户与组织成员关系，任一失败整体回滚。
+  // 邮箱已被占用返回 null（由调用方转为 409）。
+  // 个人组织是真实组织，未来升级为团队时只需追加成员，无需迁移业务数据。
+  async createUserWithOrganization(input) {
+    const email = String(input.email ?? '').trim().toLowerCase();
+    if (!email) return null;
+    const client = await this.pool.connect();
+    let releaseError;
+    try {
+      await client.query('BEGIN');
+      const existing = await client.query('SELECT id FROM users WHERE lower(email) = lower($1)', [email]);
+      if (existing.rows[0]) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const organizationId = input.organizationId ?? 'org-' + randomUUID();
+      const userId = input.userId ?? 'user-' + randomUUID();
+      await client.query('INSERT INTO organizations (id, name, kind) VALUES ($1, $2, $3)',
+        [organizationId, input.organizationName ?? email, 'personal']);
+      await client.query('INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)',
+        [userId, email, input.passwordHash, input.displayName ?? null]);
+      await client.query(`INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'org_admin')`,
+        [organizationId, userId]);
+      await client.query('COMMIT');
+      return { id: userId, email, displayName: input.displayName ?? null, organizationId, role: 'org_admin' };
+    } catch (error) {
+      releaseError = await rollbackForRelease(client);
+      throw error;
+    } finally {
+      client.release(releaseError);
+    }
+  }
+
   async withScope(scope, fn) {
     const client = await this.pool.connect();
+    let releaseError;
     try {
       await client.query('BEGIN');
       await client.query(`SELECT set_config('app.organization_id', $1, true), set_config('app.user_id', $2, true)`, [scope.organizationId, scope.userId]);
       const value = await fn(client);
       await client.query('COMMIT');
       return value;
-    } catch (error) { await client.query('ROLLBACK'); throw error; }
-    finally { client.release(); }
+    } catch (error) { releaseError = await rollbackForRelease(client); throw error; }
+    finally { client.release(releaseError); }
   }
 
   async listAgents(scope) {
@@ -288,12 +372,19 @@ export class PostgresStore {
   }
 
   async createAgent(scope, input = {}) {
+    const engine = input.engine ?? 'mock';
+    if (!['mock', 'pi', 'dsh'].includes(engine)) {
+      throw new Error('unsupported_engine');
+    }
     const id = input.id ?? 'agent-' + randomUUID();
     const row = await this.withScope(scope, async (c) => {
-      const r = await c.query(`INSERT INTO agents (id, organization_id, owner_user_id, name, status, runtime_kind, host)
-        VALUES ($1, $2, $3, $4, 'provisioning', 'mock', $5) RETURNING *`, [id, scope.organizationId, scope.userId, input.name ?? 'New agent', agentHost(id)]);
+      // status 必须显式写入：001 迁移里 agents.status 是 NOT NULL 且无 DEFAULT，
+      // 而 MemoryStore.createAgent 同样以 'provisioning' 作为初始状态，两个 Store
+      // 分支的语义需要保持一致。
+      const r = await c.query(`INSERT INTO agents (id, organization_id, owner_user_id, name, engine, runtime_kind, host, status)
+        VALUES ($1, $2, $3, $4, $5, $5, $6, 'provisioning') RETURNING *`, [id, scope.organizationId, scope.userId, input.name ?? 'New agent', engine, agentHost(id)]);
       await c.query(`INSERT INTO agent_memberships (organization_id, agent_id, user_id, role) VALUES ($1, $2, $3, 'owner') ON CONFLICT DO NOTHING`, [scope.organizationId, id, scope.userId]);
-      await c.query(`INSERT INTO control_outbox (organization_id, aggregate_type, aggregate_id, event_type, payload) VALUES ($1, 'agent', $2, 'agent.provision', $3::jsonb)`, [scope.organizationId, id, JSON.stringify({ agentId: id, userId: scope.userId, organizationId: scope.organizationId })]);
+      await c.query(`INSERT INTO control_outbox (organization_id, aggregate_type, aggregate_id, event_type, payload) VALUES ($1, 'agent', $2, 'agent.provision', $3::jsonb)`, [scope.organizationId, id, JSON.stringify({ agentId: id, userId: scope.userId, organizationId: scope.organizationId, engine })]);
       return r.rows[0];
     });
     return agentFromRow(row);
@@ -381,23 +472,25 @@ export class PostgresStore {
 
   async claimOutbox(workerId, limit = 10) {
     const c = await this.pool.connect();
+    let releaseError;
     try {
       await c.query('BEGIN');
       await c.query(`SELECT set_config('app.worker_id', $1, true)`, [workerId]);
       const r = await c.query(`WITH candidates AS (SELECT id FROM control_outbox WHERE (status = 'queued' AND available_at <= now()) OR (status = 'leased' AND lease_until < now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE control_outbox o SET status = 'leased', leased_by = $2, lease_until = now() + interval '60 seconds', attempts = attempts + 1, updated_at = now() FROM candidates x WHERE o.id = x.id RETURNING o.*`, [limit, workerId]);
       await c.query('COMMIT'); return r.rows;
-    } catch (error) { await c.query('ROLLBACK'); throw error; } finally { c.release(); }
+    } catch (error) { releaseError = await rollbackForRelease(c); throw error; } finally { c.release(releaseError); }
   }
 
   async completeOutbox(id, workerId, status, lastError = null) {
     const c = await this.pool.connect();
+    let releaseError;
     try {
       await c.query('BEGIN');
       await c.query(`SELECT set_config('app.worker_id', $1, true)`, [workerId]);
       await c.query(`UPDATE control_outbox SET status = $3, leased_by = NULL, lease_until = NULL, last_error = $4, updated_at = now() WHERE id = $1 AND leased_by = $2`, [id, workerId, status, lastError]);
       await c.query('COMMIT');
-    } catch (error) { await c.query('ROLLBACK'); throw error; }
-    finally { c.release(); }
+    } catch (error) { releaseError = await rollbackForRelease(c); throw error; }
+    finally { c.release(releaseError); }
   }
   async createAuthSession(id, userId, expiresAt) { await this.pool.query('INSERT INTO auth_sessions (id, user_id, expires_at) VALUES ($1, $2, $3)', [id, userId, new Date(expiresAt)]); return id; }
   async findAuthSession(id) { const r = await this.pool.query('SELECT id, user_id, expires_at FROM auth_sessions WHERE id = $1', [id]); const row = r.rows[0]; return row ? { id: row.id, userId: row.user_id, expiresAt: new Date(row.expires_at).getTime() } : null; }
