@@ -149,6 +149,13 @@ https://localhost {
       }
     }
   }
+  redir /admin /admin/ 308
+  handle_path /admin/* {
+    root * /srv/admin
+    header Cache-Control "no-store"
+    try_files {path} /index.html
+    file_server
+  }
   handle {
     root * /srv
     @assets path /assets/*
@@ -197,7 +204,9 @@ REVOKE ALL ON DATABASE bairui_preprod FROM PUBLIC;
 GRANT CONNECT ON DATABASE bairui_preprod TO bairui_preprod_app;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO bairui_preprod_app;
+GRANT EXECUTE ON FUNCTION public.platform_admin_read(text,text,text,text,integer,text,text) TO bairui_preprod_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bairui_preprod_app;
+REVOKE ALL ON TABLE public.platform_role_bindings, public.platform_admin_audit FROM bairui_preprod_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bairui_preprod_app;
 ALTER ROLE bairui_preprod_app SET statement_timeout = '10s';
 ALTER ROLE bairui_preprod_app SET lock_timeout = '3s';

@@ -14,8 +14,11 @@ export function developmentServices(env, target = 'all') {
       { name: 'runtime-boundary', directory: 'apps/platform-api', entry: 'src/runtime/boundary-server.mjs', port: env.RUNTIME_BOUNDARY_PORT || '8091' },
     );
   }
-  if (target !== 'api') services.push({ name: 'console-mvp', directory: 'apps/console-mvp', entry: 'node_modules/vite/bin/vite.js' });
-  return services;
+  if (target !== 'api') services.push(
+    { name: 'admin-console', directory: 'apps/admin-console', entry: 'node_modules/vite/bin/vite.js', listenPort: env.ADMIN_CONSOLE_PORT || '5174' },
+    { name: 'console-mvp', directory: 'apps/console-mvp', entry: 'node_modules/vite/bin/vite.js', listenPort: '5173' },
+  );
+  return services.map(service => service.port ? { ...service, listenPort: service.port } : service);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

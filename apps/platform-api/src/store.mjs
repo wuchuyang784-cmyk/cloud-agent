@@ -54,6 +54,8 @@ export class MemoryStore {
     this.sessions = new Map();
     this.messages = new Map();
     this.usage = new Map();
+    this.usageEvents = clone(seed.usageEvents ?? []);
+    this.runtimeRoutes = new Map((seed.runtimeRoutes ?? []).map(row => [row.agentId, clone(row)]));
     this.outbox = [];
     this.idempotency = new Map();
     this.authSessions = new Map();
@@ -246,6 +248,8 @@ export class MemoryStore {
     agent.status = 'ready';
     agent.runtimeUrl = runtimeUrl;
     agent.updatedAt = new Date().toISOString();
+    this.runtimeRoutes.set(agentId, { agentId, organizationId: agent.organizationId,
+      healthStatus: 'healthy', lastSeenAt: agent.updatedAt });
     return clone(agent);
   }
 
@@ -300,9 +304,12 @@ export class MemoryStore {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)));
   }
 
-  addUsage(scope, amount = 0) {
+  addUsage(scope, amount = 0, context = {}) {
     const key = scope.organizationId + ':' + scope.userId;
     this.usage.set(key, (this.usage.get(key) ?? 0) + amount);
+    if (context.agentId) this.usageEvents.push({ organizationId: scope.organizationId, userId: scope.userId,
+      agentId: context.agentId, calls: 1, failedCalls: 0, inputTokens: 0, outputTokens: amount,
+      latencyMs: null, occurredAt: new Date().toISOString() });
   }
 
   getUsage(scope) {

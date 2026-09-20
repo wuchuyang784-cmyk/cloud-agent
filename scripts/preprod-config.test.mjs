@@ -60,6 +60,9 @@ test('gateway serves HTTPS/static assets and separates API routing', () => {
   assert.ok(!config.includes('keepalive off'));
   assert.ok(config.includes('response_header_timeout'));
   assert.ok(config.includes('Cache-Control "no-store"'));
+  assert.ok(config.includes('handle_path /admin/*'));
+  assert.ok(config.includes('root * /srv/admin'));
+  assert.ok(config.indexOf('handle_path /admin/*') < config.indexOf('root * /srv\n'));
 });
 
 test('bootstrap uses file secrets and a restricted role in the independent database', () => {
@@ -69,6 +72,10 @@ test('bootstrap uses file secrets and a restricted role in the independent datab
   assert.ok(sql.includes('bairui_preprod'));
   assert.ok(sql.includes(input.schemaHash));
   assert.ok(!sql.includes('ALTER ROLE bairui_app'));
+  assert.ok(sql.includes('GRANT EXECUTE ON FUNCTION public.platform_admin_read(text,text,text,text,integer,text,text)'));
+  const revoke = 'REVOKE ALL ON TABLE public.platform_role_bindings, public.platform_admin_audit FROM bairui_preprod_app;';
+  assert.ok(sql.includes(revoke));
+  assert.ok(sql.indexOf(revoke) > sql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES'));
 });
 
 test('ownership and local single-node checks fail closed', () => {

@@ -121,6 +121,41 @@ export interface UsagePayload {
   series: unknown[];
 }
 
+export type MonitoringRange = 'today' | '7d' | '30d';
+export interface MonitoredAgent {
+  id: string;
+  name: string;
+  engine: string;
+  recordStatus: string;
+  recordUpdatedAt: string | null;
+  routeRecord: { source: 'lifecycle_record'; health: string; recordedAt: string | null;
+    freshness: 'missing' | 'recent' | 'stale' | 'invalid'; staleAfterSeconds: number };
+}
+export interface MonitoringPage { fetchedAt: string; items: MonitoredAgent[]; nextCursor: string | null }
+export interface MonitoringSummary {
+  events: number | null; calls: number | null; failedCalls: number | null; tokens: number | null;
+  latencySamples: number | null; avgLatencyMs: number | null; successRate: null;
+}
+export interface AgentMonitoring {
+  fetchedAt: string;
+  agent: MonitoredAgent;
+  live: { status: 'not_connected'; sampledAt: null; cpuPercent: null; memoryBytes: null };
+  usage: { range: MonitoringRange; timezone: string; from: string; to: string; source: 'usage_events';
+    coverage: 'recorded_only'; lastRecordedAt: string | null; summary: MonitoringSummary;
+    series: Array<MonitoringSummary & { day: string }> };
+}
+
+export function fetchMonitoredAgents(q: string, after: string | undefined, signal: AbortSignal): Promise<MonitoringPage> {
+  const params = new URLSearchParams({ limit: '20' });
+  if (q) params.set('q', q);
+  if (after) params.set('after', after);
+  return request('/api/user/monitoring/agents?' + params, { signal, cache: 'no-store' });
+}
+
+export function fetchAgentMonitoring(id: string, range: MonitoringRange, signal: AbortSignal): Promise<AgentMonitoring> {
+  return request('/api/user/monitoring/agents/' + encodeURIComponent(id) + '?range=' + range, { signal, cache: 'no-store' });
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 export type ApiError = Error & { status?: number; code?: string };

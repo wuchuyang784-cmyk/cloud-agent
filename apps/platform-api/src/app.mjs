@@ -10,6 +10,8 @@ import { createReadiness } from './service-lifecycle.mjs';
 import { createTelemetry, metricsConfiguration } from './observability/metrics.mjs';
 import { routeLabel } from './observability/labels.mjs';
 import { safeLog } from './observability/safe-log.mjs';
+import { handleAdmin } from './admin/routes.mjs';
+import { handleClientMonitoring } from './monitoring/client-routes.mjs';
 
 function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
@@ -161,6 +163,7 @@ export function createApp(options = {}) {
     try {
       const url = new URL(request.url, 'http://platform.local');
       const path = url.pathname;
+      if (path.startsWith('/api/admin/') || path.startsWith('/api/user/monitoring/')) response.setHeader('cache-control', 'no-store');
       if (request.method === 'GET' && ['/livez', '/readyz', '/healthz'].includes(path)) {
         response.setHeader('cache-control', 'no-store');
         if (path === '/livez') return sendJson(response, 200, { status: 'ok' });
@@ -231,7 +234,15 @@ export function createApp(options = {}) {
           : sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
       }
 
+      if (path.startsWith('/api/admin/')) {
+        return await handleAdmin({ request, response, url, principal, store,
+          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId });
+      }
       if (!principal) return sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
+
+      if (path.startsWith('/api/user/monitoring/')) {
+        return await handleClientMonitoring({ request, response, url, scope, store, sendJson, sendError, requestId });
+      }
 
       const disabled = disabledCapability(capabilities, request.method, path);
       if (disabled) return sendError(response, 403, 'capability_disabled', 'Capability unavailable: ' + disabled, requestId);

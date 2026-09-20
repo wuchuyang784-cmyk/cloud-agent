@@ -14,12 +14,32 @@
 - 已接入开源 Better Auth 1.7.5，需先导入 031、032 并显式设置 BAIRUI_AUTH_MODE=better-auth；不自动迁移旧账号或按邮箱合并业务数据。
 - 控制台未登录时展示注册/登录页，已移除共享开发账号入口。下方“自动开发登录”“不新增登录页”属于旧阶段要求，不再适用。
 - 默认 BAIRUI_PLATFORM_MODE=platform：必须 Better Auth + PostgreSQL，关闭用户侧 Agent 写操作、对话执行与模拟充值，保留本人历史查询、资源库与个人记录。前端能力默认关闭，失败/退出/乱序响应不能重新开启。
-- npm run dev 在平台模式只启动 API 和控制台；旧 Agent Worker/Runtime 的独立入口也拒绝启动。legacy 仅供非生产显式回归，不代表正式 Agent 接入。
+- npm run dev 在平台模式只启动 API、客户端和管理端前端；旧 Agent Worker/Runtime 的独立入口也拒绝启动。legacy 仅供非生产显式回归，不代表正式 Agent 接入。
 - BAIRUI_TRUSTED_PROXIES 默认留空，仅允许真实代理 IP/CIDR；不要信任整个 overlay 或伪造转发头。双 API 共享 Better Auth 数据库限流。实现边界及本机验收见 docs/36-platform-mode-and-auth-proxy.md。
 - 认证接入见 docs/33-phase1-better-auth.md，当前平台模式、启动与代理安全以 docs/36-platform-mode-and-auth-proxy.md 为准。保留现有个人空间授权，不自行扩展团队共享。
 - Better Auth 承担凭据与会话，平台仍掌握 Principal、业务所有权与 RLS；不得把认证成功等同于业务授权。
 
 ## 项目定位
+
+### 双端平台 B 批：客户端本人 Agent 监控（2026-09-19）
+
+- 客户端“开发与部署 / 可观测”已接入本人 Agent 只读列表、搜索、分页和今日/近 7 天/近 30 天的历史用量；不改变原导航、资源库和平台能力开关。
+- `/api/user/monitoring/agents` 与明细接口始终按 Principal 的组织、用户和 Agent 所有权授权；平台管理员使用这些客户端接口也不能跨用户。所有响应 no-store，不返回内部 Runtime 地址或事件 metadata。
+- `runtime_routes.last_seen_at` 只是生命周期记录，不是持续心跳。超过 5 分钟标为陈旧；真实采样时间、CPU、内存保持 null。用量仅包含已入库事件，不伪造成功率、费用和缺失日期的零值。
+- 复用现有表，不新增业务迁移。PostgreSQL 查询语句限时 3 秒；前端请求超时、切换、退出、乱序响应会清空并隔离旧数据。`npm run test:client-monitoring` 建立独立测试库，不读取业务 `.env`。
+- 中文接入与验收见 `docs/40-dual-console-phase-b.md`。独立数据库专项 7 项及桌面/手机浏览器验收通过，不代表真实 Runtime 或业务库/常驻预发已部署。
+- 用户已明确指定首个管理员的已有邮箱账号。2026-09-19 已备份业务库 `bairui`、导入 034、授予最小函数权限，并将该账号显示名称设为 `admin`、平台角色设为 `platform_admin`；保留原密码、认证身份和个人空间，不新建重复账号。真实邮箱与备份只保留在本地，不写入通用文档。
+
+### 双端平台 A 批：管理入口与只读权限（2026-09-19）
+
+- 管理端为独立 `apps/admin-console`，正式开发入口是客户端相同 origin 的 `/admin/`，内部 Vite 默认 5174。复用 Better Auth 会话，不增加另一套密码、注册或共享登录；管理端退出会使同一浏览器的客户端会话失效。
+- 迁移 `034_platform_admin.sql` 建立显式 `platform_viewer/operator/admin` 角色、受限管理查询函数与访问记录。三类角色本批均只读；个人空间 `org_admin`、历史组织角色不能获得管理端权限。
+- `/api/admin/me`、`/api/admin/users`、`/api/admin/agents` 每次按服务端 Principal 复核平台授权。固定返回字段、有界游标分页、no-store；`/api/user/*` 继续只允许本人范围。
+- 应用账号只授管理函数 EXECUTE，不授 BYPASSRLS 或管理表写权限；两张管理表强制 RLS。SECURITY DEFINER 函数信任后端 actor，不是防止应用数据库凭据泄漏的独立认证层。
+- 本批 Agent 状态来自数据库记录，不是实时健康指标。不提供暂停、封禁、改角色或 Runtime 操作。客户端 UI 不增加管理端功能。
+- 中文接入见 `docs/39-dual-console-phase-a.md`。当前业务库已在用户明确授权后完成首个管理账号配置；其他环境仍须先备份、迁移并明确指定账号。禁止自动提升其他真实账号或重建预发来绕过迁移。
+- 独立验证入口 `npm run test:admin`、`npm run test:admin:web`、`npm run build:admin`。业务库已用真实受限应用连接验证管理员读取、其他 4 个账号拒绝、管理表直读拒绝；真实账号浏览器验收仍需用户重启开发服务后使用原密码完成。常驻预发未修改，不代表监控部署、真实 Agent 或平台治理已完成。
+- 后续顺序：B 本人 Agent 监控，C 管理端基础设施观测，D 治理执行闭环，E 真实 Runtime。D 批规则：暂停账号服务允许只读登录；封禁账号禁止登录并撤销会话、阻止 Agent 服务；解除不自动启动 Agent。
 
 ### 第三阶段 3.2 监控与本地告警（2026-09-19，代码已验证，未部署验收）
 
@@ -95,6 +115,7 @@ npm run dev:web        # 前端控制台 :5173
 - `apps/platform-api/src/runtime/pi/`：pi 实例 wrapper（镜像/本地子进程，`pi --mode rpc` 常驻 + 信封校验）。
 - `apps/platform-api/docker/pi/`：bairui-agent-pi 基线镜像 Dockerfile 与验收说明。
 - `apps/console-mvp/`：客户端控制台（保留历史目录名），React + Vite，未登录显示真实注册/登录入口。
+- `apps/admin-console/`：独立只读管理端；不得将跨用户接口接入客户端控制台。
 - `packages/db/migrations/`：PostgreSQL 数据库结构迁移，按文件名前缀顺序执行。
 - `infra/postgres/`：本地 PostgreSQL 使用说明。
 - `infra/swarm/`：Docker Swarm 编排文件。

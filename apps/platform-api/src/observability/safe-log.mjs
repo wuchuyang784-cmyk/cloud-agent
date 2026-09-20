@@ -3,6 +3,7 @@ import { allowedRouteLabel, methodLabel, statusLabel } from './labels.mjs';
 const events = new Set([
   'http_request_error', 'runtime_provision_error', 'auth_event',
   'api_started', 'api_startup_error', 'api_shutdown_error', 'metrics_scrape_error',
+  'client_monitoring_unavailable',
 ]);
 
 // Rebuild records from finite vocabularies. Never serialize caught objects or their messages.

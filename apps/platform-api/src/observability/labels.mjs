@@ -1,6 +1,7 @@
 const methods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 const fixedRoutes = new Set([
   '/livez', '/readyz', '/healthz',
+  '/api/admin/me', '/api/admin/users', '/api/admin/agents',
   '/api/auth/config', '/api/auth/me', '/api/auth/register', '/api/auth/login',
   '/api/auth/dev-login', '/api/auth/logout', '/api/auth/sign-up/email',
   '/api/auth/sign-in/email', '/api/auth/sign-out', '/api/simulation/tasks',
@@ -8,8 +9,10 @@ const fixedRoutes = new Set([
   '/api/user/notifications', '/api/user/notifications/read-all', '/api/user/settings',
   '/api/user/account', '/api/user/billing/transactions', '/api/user/billing/recharge',
   '/api/user/filings',
+  '/api/user/monitoring/agents',
 ]);
 const dynamicRoutes = [
+  [/^\/api\/user\/monitoring\/agents\/[^/]+$/, '/api/user/monitoring/agents/:agentId'],
   [/^\/api\/user\/resources\/[^/]+$/, '/api/user/resources/:resourceId'],
   [/^\/api\/user\/agents\/[^/]+$/, '/api/user/agents/:agentId'],
   [/^\/api\/user\/agents\/[^/]+\/sessions$/, '/api/user/agents/:agentId/sessions'],

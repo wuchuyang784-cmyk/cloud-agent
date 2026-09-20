@@ -78,6 +78,22 @@ function Start-NodeService {
     [void]$children.Add($process)
 }
 
+function Assert-ServicePortsAvailable {
+    param([object[]]$Services)
+    $listeners = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.State -eq 'Listen' })
+    $conflicts = @(foreach ($candidate in $Services) {
+        if (-not $candidate.listenPort) { continue }
+        foreach ($listener in $listeners) {
+            if ($listener.LocalPort -eq [int]$candidate.listenPort) {
+                '{0}: 端口 {1}，PID {2}' -f $candidate.name, $candidate.listenPort, $listener.OwningProcess
+            }
+        }
+    })
+    if ($conflicts.Count) {
+        throw ('端口已被占用，尚未启动新服务：' + ($conflicts -join '；') + '。请在原开发终端按 Ctrl+C 停止旧服务后重试；脚本不会自动结束占用进程。')
+    }
+}
+
 Set-Location -LiteralPath $root
 Initialize-LocalEnv -EnvFile (Join-Path $root '.env') -ExampleFile (Join-Path $root '.env.example')
 $serviceJson = & node (Join-Path $PSScriptRoot 'dev-services.mjs') $Target
@@ -85,6 +101,7 @@ if ($LASTEXITCODE -ne 0) { throw '启动配置检查失败，请检查平台模�
 # PowerShell 5.1 返回整个 JSON 数组，不能再用 @() 包成嵌套数组。
 $services = $serviceJson | ConvertFrom-Json
 Write-Step ("本次启动：" + (($services | ForEach-Object { $_.name }) -join ', '))
+Assert-ServicePortsAvailable -Services $services
 
 try {
     foreach ($service in $services) {

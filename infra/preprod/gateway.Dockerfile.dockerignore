@@ -1,5 +1,13 @@
 **
 !apps/
+!apps/admin-console/
+!apps/admin-console/package.json
+!apps/admin-console/package-lock.json
+!apps/admin-console/src/
+!apps/admin-console/src/**
+!apps/admin-console/index.html
+!apps/admin-console/tsconfig.json
+!apps/admin-console/vite.config.ts
 !apps/console-mvp/
 !apps/console-mvp/package.json
 !apps/console-mvp/package-lock.json
