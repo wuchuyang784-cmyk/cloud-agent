@@ -2,6 +2,8 @@
 @import "../theme.css";
 
 @layer components {
+.account-restriction { display: flex; gap: 8px; align-items: center; padding: 12px 20px; background: #fff4e5; color: #885518; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.account-restriction svg { flex-shrink: 0; }
 :root {
   color: #1f2329;
   background: #f5f7fa;
@@ -913,6 +915,14 @@ tbody tr:hover td { background: color-mix(in srgb, var(--tc-primary-light) 58%, 
 .console-connection { display: inline-flex; align-items: center; gap: 6px; color: #4e5969; font-size: 12px; white-space: nowrap; }
 @media (max-width: 1024px) { .console-search { width: 250px; } .console-user-meta small { max-width: 140px; } }
 @media (max-width: 900px) { .console-search-wrap { display: none; } .console-topbar-nav { display: none; } }
+@media (max-width: 360px) {
+  .console-topbar { gap: 8px; }
+  .console-brand { gap: 6px; }
+  .console-brand small { display: none; }
+  .console-topbar-right { flex-shrink: 0; }
+  .console-top-actions { gap: 2px; }
+  .console-top-actions .icon-button { flex: 0 0 36px; }
+}
 
 /* Account features: favorites, notifications, billing, filings, settings */
 .console-app .icon-button.active { background: var(--tc-primary-light, #e8f3ff); color: #0052d9; }

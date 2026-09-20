@@ -76,6 +76,12 @@ test('bootstrap uses file secrets and a restricted role in the independent datab
   const revoke = 'REVOKE ALL ON TABLE public.platform_role_bindings, public.platform_admin_audit FROM bairui_preprod_app;';
   assert.ok(sql.includes(revoke));
   assert.ok(sql.indexOf(revoke) > sql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES'));
+  for (const fn of ['platform_account_access(text)', 'platform_account_session_allowed(text)', 'platform_governance_accounts(text,text[])',
+    'platform_governance_read(text,text,bigint)', 'platform_governance_change(text,text,text,integer,text,uuid)']) assert.ok(sql.includes('public.' + fn));
+  const governanceRevoke = 'REVOKE ALL ON TABLE public.platform_account_governance, public.platform_governance_audit FROM bairui_preprod_app;';
+  assert.ok(sql.indexOf(governanceRevoke) > sql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES'));
+  assert.ok(sql.indexOf('REVOKE ALL ON SEQUENCE public.platform_governance_audit_id_seq FROM bairui_preprod_app;')
+    > sql.indexOf('GRANT USAGE, SELECT ON ALL SEQUENCES'));
 });
 
 test('ownership and local single-node checks fail closed', () => {

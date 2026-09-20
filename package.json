@@ -4,6 +4,13 @@
   "private": true,
   "description": "BaiRui Cloud Agent Platform 根目录脚本：一键启动本地开发环境",
   "scripts": {
+    "test:governance": "node scripts/test-scheduler.mjs --governance",
+    "test:governance:web": "node scripts/test-governance-browser.mjs",
+    "infra:check": "node --env-file-if-exists=.env.infrastructure scripts/infrastructure-collector.mjs --check",
+    "infra:collect": "node --env-file-if-exists=.env.infrastructure scripts/infrastructure-collector.mjs",
+    "infra:once": "node --env-file-if-exists=.env.infrastructure scripts/infrastructure-collector.mjs --once",
+    "test:infrastructure": "node scripts/test-scheduler.mjs --infrastructure",
+    "test:infrastructure:web": "node scripts/test-infrastructure-browser.mjs",
     "monitor:up": "node scripts/monitoring.mjs up",
     "monitor:status": "node scripts/monitoring.mjs status",
     "monitor:stop": "node scripts/monitoring.mjs stop",

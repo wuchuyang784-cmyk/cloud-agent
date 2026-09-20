@@ -1,4 +1,6 @@
 import { betterAuth } from 'better-auth';
+import { APIError } from 'better-auth/api';
+import { sessionAllowed } from '../admin/governance.mjs';
 import { fromNodeHeaders } from 'better-auth/node';
 import { createClientIPResolver } from './client-ip.mjs';
 import { authPostgresDatabase } from './postgres-database.mjs';
@@ -49,7 +51,16 @@ export class BetterAuthPrincipalResolver {
     if (env.NODE_ENV === 'test' && options.betterAuthDatabase) config.database = options.betterAuthDatabase;
     this.provider = 'better-auth';
     this.baseURL = config.baseURL;
+    config.databaseHooks = { session: { create: { before: async (session, context) => {
+      // Sign-up holds an auth transaction; its session INSERT uses the SQL guard on that connection.
+      if (store.pool && context?.path === '/sign-up/email') return;
+      if (!await sessionAllowed(store, session.userId)) throw new APIError('FORBIDDEN', { code: 'account_banned', message: 'Account access is restricted' });
+    } } } };
     this.auth = betterAuth(config);
+    if (!store.pool) store.governanceRevokeSessions = async userId => {
+      const subject = store.users.get(userId)?.authSubject;
+      if (subject?.startsWith('better-auth:')) await (await this.auth.$context).internalAdapter.deleteUserSessions(subject.slice('better-auth:'.length));
+    };
   }
 
   async resolve(request) {

@@ -1,0 +1,26 @@
+[Unit]
+Description=BaiRui host and Swarm resource collector
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=bairui-infra
+Group=bairui-infra
+# Docker group access is privileged; approve it only on the collecting manager.
+SupplementaryGroups=docker
+WorkingDirectory=/opt/bairui/cloud-agent
+LoadCredential=infrastructure.env:/etc/bairui/infrastructure.env
+Environment=DOCKER_CONFIG=/etc/bairui/docker
+ExecStart=/usr/bin/node --env-file=${CREDENTIALS_DIRECTORY}/infrastructure.env /opt/bairui/cloud-agent/scripts/infrastructure-collector.mjs
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

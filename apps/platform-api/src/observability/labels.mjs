@@ -12,6 +12,7 @@ const fixedRoutes = new Set([
   '/api/user/monitoring/agents',
 ]);
 const dynamicRoutes = [
+  [/^\/api\/admin\/users\/[^/]+\/governance$/, '/api/admin/users/:userId/governance'],
   [/^\/api\/user\/monitoring\/agents\/[^/]+$/, '/api/user/monitoring/agents/:agentId'],
   [/^\/api\/user\/resources\/[^/]+$/, '/api/user/resources/:resourceId'],
   [/^\/api\/user\/agents\/[^/]+$/, '/api/user/agents/:agentId'],

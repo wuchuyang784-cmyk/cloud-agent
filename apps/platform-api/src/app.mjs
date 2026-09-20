@@ -12,6 +12,7 @@ import { routeLabel } from './observability/labels.mjs';
 import { safeLog } from './observability/safe-log.mjs';
 import { handleAdmin } from './admin/routes.mjs';
 import { handleClientMonitoring } from './monitoring/client-routes.mjs';
+import { accountAccess, GovernanceError } from './admin/governance.mjs';
 
 function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
@@ -183,6 +184,13 @@ export function createApp(options = {}) {
         return await auth.handle(request, response, path, maxBodyBytes);
       }
       const principal = await auth.resolve(request);
+      if (principal && auth.provider === 'better-auth') {
+        const account = await accountAccess(store, principal.userId);
+        response.setHeader('cache-control', 'no-store');
+        if (account.status === 'banned') return sendError(response, 401, 'account_banned', 'Account access is restricted', requestId);
+        principal.accountStatus = account.status;
+        if (account.status === 'suspended' && !['GET', 'HEAD'].includes(request.method)) return sendError(response, 403, 'account_suspended', 'Account is read-only', requestId);
+      }
       const scope = principal && { userId: principal.userId, organizationId: principal.organizationId };
 
       // 注册：创建个人组织与账号并直接签发会话。生产环境同样可用，
@@ -236,7 +244,7 @@ export function createApp(options = {}) {
 
       if (path.startsWith('/api/admin/')) {
         return await handleAdmin({ request, response, url, principal, store,
-          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId });
+          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId, env, readJson });
       }
       if (!principal) return sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
 
@@ -604,6 +612,7 @@ export function createApp(options = {}) {
 
       return sendError(response, 404, 'not_found', 'Not found', requestId);
     } catch (caught) {
+      if (caught instanceof GovernanceError) return sendError(response, caught.status, caught.code, caught.code, requestId);
       if (caught.message === 'invalid_client_ip') return sendError(response, 400, 'invalid_client_ip', 'Invalid client address', requestId);
       if (caught instanceof TaskError) return sendError(response, caught.code === 'queue_full' ? 429 : caught.code === 'idempotency_conflict' ? 409 : 422, caught.code, caught.code, requestId);
       if (caught.message === 'identity_link_required') return sendError(response, 409, 'identity_link_required', 'Account migration requires verified identity linking', requestId);

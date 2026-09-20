@@ -6,6 +6,82 @@ const me = { role: 'platform_viewer', permissions: ['users:read', 'agents:read']
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
+test('governance UI: timeout retry preserves request identity, confirmed changes refresh status', async () => {
+  const commands = []; let attempts = 0;
+  const model = new AdminSession(async (path, options) => {
+    if (path.endsWith('/governance') && options?.method === 'POST') {
+      commands.push(JSON.parse(options.body));
+      if (++attempts === 1) throw new Error('network_lost');
+      return response({ account: { status: 'suspended', version: 1 } });
+    }
+    return response(path === '/api/admin/me' ? { ...me, role: 'platform_admin', permissions: [...me.permissions, 'users:govern'] }
+      : path.endsWith('/governance') ? { account: { status: attempts > 1 ? 'suspended' : 'active', version: attempts > 1 ? 1 : 0 }, items: [], nextCursor: null }
+      : { items: [{ id: 'target', email: 'target@example.test' }], nextCursor: null });
+  });
+  await model.load({ view: 'users' });
+  await model.openGovernance({ id: 'target' });
+  await model.govern('suspended', 'test reason');
+  assert.ok(model.getSnapshot().governance.retry);
+  assert.equal(model.getSnapshot().governance.success, '');
+  await model.govern('banned', 'changed input must not alter retry');
+  assert.deepEqual(commands[0], commands[1]);
+  assert.equal(model.getSnapshot().governance.account.status, 'suspended');
+  assert.ok(model.getSnapshot().governance.success);
+});
+
+test('governance UI: logout and navigation clear sensitive detail and ignore late mutation responses', async () => {
+  const pending = deferred();
+  const model = new AdminSession(async (path, options) => path.includes('sign-out') ? response({})
+    : path === '/api/admin/me' ? response({ ...me, role: 'platform_admin', permissions: [...me.permissions, 'users:govern'] })
+    : options?.method === 'POST' ? pending.promise
+    : path.endsWith('/governance') ? response({ account: { status: 'active', version: 0 }, items: [], nextCursor: null })
+    : response({ items: [], nextCursor: null }));
+  await model.load({ view: 'users' }); await model.openGovernance({ id: 'target' });
+  const change = model.govern('banned', 'test reason');
+  await model.signOut(); pending.resolve(response({})); await change;
+  assert.equal(model.getSnapshot().phase, 'login');
+  assert.equal(model.getSnapshot().governance, null);
+});
+
+test('infrastructure UI: dedicated permission, no list query, clear telemetry on logout and ignore late responses', async () => {
+  const pending = deferred(), calls = [];
+  const model = new AdminSession(async path => {
+    calls.push(path);
+    return path === '/api/admin/me' ? response({ ...me, permissions: [...me.permissions, 'infrastructure:read'] })
+      : path.includes('sign-out') ? response({}) : pending.promise;
+  });
+  const load = model.load({ view: 'infrastructure', limit: '25', q: 'old-user-query' });
+  await new Promise(r => setImmediate(r));
+  assert.equal(calls[1], '/api/admin/infrastructure');
+  await model.signOut();
+  pending.resolve(response({ items: [], observedAt: new Date().toISOString(), staleAfterSeconds: 90, truncated: false }));
+  await load;
+  assert.equal(model.getSnapshot().infrastructure, null);
+  assert.equal(model.getSnapshot().phase, 'login');
+});
+
+test('infrastructure UI: resource payload kept separate from account rows, cleared when changing view', async () => {
+  const payload = { items: [], observedAt: new Date().toISOString(), staleAfterSeconds: 90, truncated: false };
+  const model = new AdminSession(async path => response(path === '/api/admin/me'
+    ? { ...me, permissions: [...me.permissions, 'infrastructure:read'] } : path.includes('infrastructure') ? payload : { items: [], nextCursor: null }));
+  await model.load({ view: 'infrastructure' });
+  assert.equal(model.getSnapshot().phase, 'ready');
+  assert.deepEqual(model.getSnapshot().infrastructure, payload);
+  await model.load({ view: 'users' });
+  assert.equal(model.getSnapshot().infrastructure, null);
+});
+
+test('admin UI: stalled requests time out and cannot repopulate protected state', async () => {
+  const pending = deferred();
+  const model = new AdminSession(async () => pending.promise, 20);
+  await model.load({ view: 'users' });
+  assert.equal(model.getSnapshot().phase, 'error');
+  assert.equal(model.getSnapshot().me, null);
+  pending.resolve(response(me));
+  await new Promise(r => setImmediate(r));
+  assert.equal(model.getSnapshot().phase, 'error');
+});
+
 test('admin UI: browser fetch is not called with the model as its receiver', async t => {
   t.mock.method(globalThis, 'fetch', async function(path) {
     assert.ok(this === undefined || this === globalThis, 'browser fetch rejects a foreign receiver');

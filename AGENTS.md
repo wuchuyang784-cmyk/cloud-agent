@@ -21,6 +21,31 @@
 
 ## 项目定位
 
+### 双端平台 D1：账号治理（2026-09-20，独立验收，业务库未启用）
+
+- 管理端用户列表可查看账号状态和治理审计；只有 active 的 `platform_admin` 可暂停、封禁、解除。viewer/operator 只读，不能操作自己或限制最后一个有效管理员。
+- suspended 允许登录和本人业务查询，拒绝业务写入及管理端访问；banned 禁止登录并撤销全部 Better Auth 会话；解除不恢复旧会话、不启动 Agent、不改变平台能力开关。客户端导航和资源库保留。
+- 新迁移 `036_account_governance.sql` 依赖基础表、032、034，不依赖模拟调度 033。治理状态和审计表 FORCE RLS，应用账号只获五个受限函数的 EXECUTE，不直读写治理表或使用审计序列。
+- 状态、会话删除和审计在同一事务提交；版本校验、请求 UUID 幂等和短事务锁保护并发治理。会话创建触发器与治理共享身份锁，防止并发登录留下有效会话。缺表、缺权限或状态不确定时拒绝访问，不回退放行。
+- 客户端每 30 秒、焦点/可见性变化或暂停拒绝时刷新身份；这不是实时推送。后端每次按账号状态准入，不依赖界面刷新，也不承诺撤销已准入的在途操作。
+- `npm run test:governance` 和 `test:governance:web` 使用一次性测试库与测试身份，不读取业务 `.env`；后者需本机已安装的 Playwright/Chromium。不得关闭认证限流以使验收通过。
+- 中文技术路径和启用步骤见 `docs/42-dual-console-phase-d1.md`。本批没有迁移业务 `bairui`、修改真实账号或常驻预发。启用前备份、执行 036、最小授权，所有 API 同版升级；不要让忽略治理的旧副本继续接流量。
+- D1 仅完成账号准入治理，Agent 强停、调度取消、资源回收和真实 Runtime 仍属后续 D2/E；不能把本批写成真实 Agent 治理或生产高并发已验收。
+
+### 双端平台 C 批：管理端服务器资源（2026-09-20，业务库已接入）
+
+- 管理端 `/admin/` 新增“服务器资源”，展示采集主机 CPU 使用率、逻辑 CPU 数、内存，以及 Swarm 节点容量、非终态任务预留/限制、服务副本和未分配任务。客户端不增加跨用户或服务器管理入口。
+- 继续不接模型、模型 API 或真实 Agent；平台模式的 Agent 写入和执行保持关闭。复用 Better Auth、显式平台角色和现有管理端，不增加另一套账号系统。
+- 新迁移 `035_platform_infrastructure.sql` 依赖基础表和 034、不依赖 033。两张资源表强制 RLS；应用账号只获读取函数 EXECUTE，独立采集登录账号只获上报函数 EXECUTE，由 DBA 绑定 `session_user` 与采集源。
+- 独立采集进程使用操作系统指标和固定只读 Docker CLI，API 不挂载 docker.sock。入口为 `npm run infra:check`、`npm run infra:once`、`npm run infra:collect`；配置独立保存在已忽略的 `.env.infrastructure`，不复用业务 `.env` 或应用账号。
+- Windows 主机实测值和 Docker Desktop Linux VM 容量分开；预留/限制不是实际用量。节点实测 CPU/内存仍为 null；每源仅保存最新快照，超过 90 秒标为过期，无数据不补零。
+- 采集边界为本机 Docker context、最多 32 节点/128 服务/2048 条任务记录，单轮 Docker 查询最多 20 秒。Docker 只读是本批代码的操作范围，不是对持有 Docker 权限账号的沙箱。
+- `npm run test:infrastructure` 9 项通过（含新增 Linux 服务模板静态检查），桌面/390px/320px 浏览器验收通过，包含真实只读采样、过期、不可用、空状态、撤权和普通用户拒绝；管理端、客户端及平台模式回归通过。中文说明见 `docs/41-dual-console-phase-c.md`。
+- 用户确认后已备份业务库 `bairui` 并执行 035，配置应用最小读取授权、独立受限采集账号及 `development-host` 源；真实快照入库且经应用投影为 fresh。原管理员授权读取和 4 个普通用户拒绝已验证，不改账号密码或伪造登录会话。
+- 本地开发服务已重启，独立采集进程在 `cloud` 环境启动；凭据仅保留于受限本地配置，不进入 Git。未安装 Windows 开机服务，未修改常驻预发。操作记录和备份在已忽略的 `output/infrastructure-provisioning/20260920/`，不要按历史 PID 盲目停止进程。
+- Linux 原生采集部署说明及 systemd 模板见 docs/41 第 8 节与 `infra/systemd/bairui-infrastructure.service`。服务器需单独迁移授权、每主机独立源和凭据；manager 采集集群，worker 只采主机。模板未在 Linux 实机部署，Docker 权限仍需明确评审。
+- 既有 Prometheus/Grafana 部署、治理封禁、自动扩缩容和真实 Runtime 不属于本批完成范围。
+
 ### 双端平台 B 批：客户端本人 Agent 监控（2026-09-19）
 
 - 客户端“开发与部署 / 可观测”已接入本人 Agent 只读列表、搜索、分页和今日/近 7 天/近 30 天的历史用量；不改变原导航、资源库和平台能力开关。

@@ -30,6 +30,7 @@ test('PostgreSQL: migrations, two API replicas, concurrent identity mapping and 
     }
     await admin.query('GRANT USAGE ON SCHEMA ' + schema + ' TO ' + role);
     await admin.query('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ' + schema + ' TO ' + role);
+    await pool.query('GRANT EXECUTE ON FUNCTION platform_account_access(text),platform_account_session_allowed(text) TO ' + role);
     await pool.end();
     pool = new Pool({ connectionString, options: '-c search_path=' + schema + ',public -c role=' + role });
     const privilege = (await pool.query('SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user')).rows[0];

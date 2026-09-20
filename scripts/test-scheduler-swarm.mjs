@@ -117,6 +117,7 @@ try {
   await admin.query('GRANT CONNECT ON DATABASE scheduler_check TO scheduler_app');
   await admin.query('GRANT USAGE ON SCHEMA public TO scheduler_app');
   await admin.query('GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO scheduler_app');
+  await admin.query('GRANT EXECUTE ON FUNCTION platform_account_access(text),platform_account_session_allowed(text) TO scheduler_app');
   const role = (await admin.query("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname='scheduler_app'")).rows[0];
   assert.equal(role.rolsuper, false); assert.equal(role.rolbypassrls, false);
 

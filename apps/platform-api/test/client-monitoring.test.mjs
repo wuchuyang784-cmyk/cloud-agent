@@ -111,7 +111,10 @@ test('client monitoring: structured historical usage is per-agent, windowed, not
 
 test('client monitoring: database failures return a safe 503 and a fixed log event', async t => {
   const { store, get } = await fixture(t);
-  store.pool = {};
+  store.pool = { async connect() { return {
+    async query(sql) { return { rows: sql.includes('platform_account_access') ? [{ result: { status: 'active', version: 0 } }] : [] }; },
+    release() {},
+  }; } };
   store.withScope = async () => { throw new Error('postgres://private-password SELECT private-content'); };
   const logs = [];
   t.mock.method(console, 'error', text => logs.push(JSON.parse(text)));
