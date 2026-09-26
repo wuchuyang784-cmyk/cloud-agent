@@ -108,6 +108,45 @@ try {
   await page.getByRole('button', { name: '治理 govern-user@example.test', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '账号治理' });
   await dialog.getByText('正常', { exact: true }).waitFor();
+  const reasonInput = dialog.getByLabel('操作原因', { exact: true });
+  const confirmButton = dialog.getByRole('button', { name: '确认操作', exact: true });
+  const governancePosts = [];
+  const trackGovernancePost = request => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/governance')) governancePosts.push(request.url());
+  };
+  page.on('request', trackGovernancePost);
+  await dialog.getByLabel('账号操作', { exact: true }).selectOption('banned');
+  await reasonInput.fill('1');
+  assert.equal(await confirmButton.isEnabled(), true, 'a single-character reason must be accepted');
+  assert.equal(await reasonInput.getAttribute('aria-invalid'), 'false');
+  await reasonInput.fill(' 1 ');
+  assert.equal(await confirmButton.isEnabled(), true);
+  await reasonInput.fill('');
+  assert.equal(await confirmButton.isDisabled(), true);
+  await reasonInput.fill('   ');
+  assert.equal(await confirmButton.isDisabled(), true);
+  assert.equal(await reasonInput.getAttribute('aria-invalid'), 'true');
+  await dialog.getByText('请填写操作原因，不能仅包含空白。', { exact: true }).waitFor();
+  await dialog.locator('form').dispatchEvent('submit');
+  await reasonInput.fill('测试\n原因');
+  assert.equal(await confirmButton.isDisabled(), true);
+  await dialog.getByText('操作原因不能包含换行或控制字符。', { exact: true }).waitFor();
+  await reasonInput.fill('测试');
+  assert.equal(await reasonInput.getAttribute('aria-invalid'), 'false');
+  assert.equal(await confirmButton.isEnabled(), true);
+  await dialog.getByLabel('账号操作', { exact: true }).selectOption('active');
+  assert.equal(await confirmButton.isDisabled(), true);
+  await dialog.getByText('账号已处于所选状态，无需重复操作。', { exact: true }).waitFor();
+  await dialog.getByLabel('账号操作', { exact: true }).selectOption('banned');
+  await reasonInput.fill('1');
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 1000 });
+    assert.equal(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), true, 'validation message overflow at ' + width);
+    await page.screenshot({ path: join(output, 'governance-validation-' + width + '.png'), fullPage: true });
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  assert.equal(governancePosts.length, 0, 'editing or submitting an invalid form must not mutate governance');
+  page.off('request', trackGovernancePost);
   async function govern(status, reason, label) {
     await dialog.getByLabel('账号操作', { exact: true }).selectOption(status);
     await dialog.getByLabel('操作原因', { exact: true }).fill(reason);
@@ -135,7 +174,8 @@ try {
     assert.ok(overflow.scroll <= width, 'client page overflow: ' + JSON.stringify(overflow));
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await govern('banned', '浏览器验收：封禁账号', '已封禁');
+  await govern('banned', '1', '已封禁');
+  await dialog.locator('.governance-history li').first().getByText('1', { exact: true }).waitFor();
   assert.equal((await userContext.request.get(origin + '/api/auth/me')).status(), 401);
   await login(userPage, 'govern-user@example.test', '/', 403);
   await userPage.getByRole('alert').filter({ hasText: '账号已封禁' }).waitFor();

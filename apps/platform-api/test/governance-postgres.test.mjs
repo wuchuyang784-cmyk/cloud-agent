@@ -19,7 +19,8 @@ test('governance PostgreSQL: atomic decisions, single-connection pool and two AP
     await owner.query('CREATE ROLE ' + role + ' NOLOGIN NOSUPERUSER NOBYPASSRLS');
     elevated = new Pool({ connectionString, options: '-c search_path=' + schema + ',public' });
     const migrations = new URL('../../../packages/db/migrations/', import.meta.url);
-    for (const name of (await readdir(migrations)).filter(n => n.endsWith('.sql') && !n.startsWith('033')).sort()) await elevated.query(await readFile(new URL(name, migrations), 'utf8'));
+    // Apply 037 after there is audit history to exercise an existing 036 installation.
+    for (const name of (await readdir(migrations)).filter(n => n.endsWith('.sql') && !n.startsWith('033') && !n.startsWith('037')).sort()) await elevated.query(await readFile(new URL(name, migrations), 'utf8'));
     await elevated.query(await readFile(new URL('036_account_governance.sql', migrations), 'utf8'));
     await elevated.query('GRANT USAGE ON SCHEMA ' + schema + ' TO ' + role);
     await elevated.query('GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA ' + schema + ' TO ' + role);
@@ -66,14 +67,36 @@ test('governance PostgreSQL: atomic decisions, single-connection pool and two AP
       assert.equal(login.status, 200);
       assert.equal((await (await request('/api/auth/me', cookieOf(login), undefined, 1)).json()).user.accountStatus, 'suspended');
     });
-    await t.test('ban revokes sessions, prevents login; unban does not revive old cookies or open Agent execution', async () => {
-      assert.equal((await change(b, 'banned', 1)).status, 200);
+    await t.test('037 upgrades existing audit history repeatedly without changing function grants or ownership', async () => {
+      const before = await (await history(b)).json();
+      const permissions = () => elevated.query("SELECT oid,proowner,proacl::text,prosecdef,proconfig FROM pg_proc WHERE oid='platform_governance_change(text,text,text,integer,text,uuid)'::regprocedure");
+      const grants = (await permissions()).rows;
+      const migration = await readFile(new URL('037_governance_reason_length.sql', migrations), 'utf8');
+      await elevated.query(migration);
+      await elevated.query(migration);
+      assert.deepEqual((await permissions()).rows, grants);
+      assert.deepEqual(await (await history(b)).json(), before);
+      assert.equal(before.items[0].reason, 'acceptance reason');
+      for (const reason of ['', '   ', 'x'.repeat(501), 'test\nreason']) {
+        assert.equal((await change(b, 'banned', 1, a, { reason })).status, 422);
+        await assert.rejects(pool.query('SELECT platform_governance_change($1,$2,$3,$4,$5,$6)',
+          [a.user.userId, b.user.userId, 'banned', 1, reason, randomUUID()]), { code: '22023' });
+      }
+      assert.deepEqual(await (await history(b)).json(), before);
+    });
+    await t.test('single-character ban revokes sessions and audits once; unban does not revive cookies or open Agents', async () => {
+      const requestId = randomUUID();
+      assert.equal((await change(b, 'banned', 1, a, { reason: ' 1 ', requestId })).status, 200);
+      assert.equal((await change(b, 'banned', 1, a, { reason: '1', requestId }, 1)).status, 200);
+      const audit = await (await history(b)).json();
+      assert.equal(audit.items.length, 2);
+      assert.equal(audit.items[0].reason, '1');
       assert.equal((await request('/api/auth/me', b.cookie, undefined, 1)).status, 401);
       const denied = await request('/api/auth/sign-in/email', '', { email: b.email, password });
       assert.equal(denied.status, 403, await denied.clone().text());
       assert.equal(denied.headers.getSetCookie().length, 0);
       assert.equal((await elevated.query('SELECT count(*)::int n FROM ba_session s JOIN users u ON u.auth_subject=\'better-auth:\'||s."userId" WHERE u.id=$1', [b.user.userId])).rows[0].n, 0);
-      assert.equal((await change(b, 'active', 2, a, {}, 1)).status, 200);
+      assert.equal((await change(b, 'active', 2, a, { reason: 'x'.repeat(500) }, 1)).status, 200);
       assert.equal((await request('/api/auth/me', b.cookie)).status, 401);
       const login = await request('/api/auth/sign-in/email', '', { email: b.email, password }, 1);
       assert.equal(login.status, 200, await login.clone().text()); b.cookie = cookieOf(login);

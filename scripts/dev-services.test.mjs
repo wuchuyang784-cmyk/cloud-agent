@@ -32,6 +32,15 @@ test('development services declare every listening port, including the separate 
   assert.equal(legacy.find(service => service.name === 'platform-worker').listenPort, undefined);
 });
 
+test('browser-facing local development URL uses localhost consistently', async () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const startupScript = await readFile(new URL('./dev.ps1', import.meta.url), 'utf8');
+  const envExample = await readFile(join(root, '.env.example'), 'utf8');
+  assert.match(startupScript, /访问 http:\/\/localhost:5173/);
+  assert.doesNotMatch(startupScript, /访问 http:\/\/127\.0\.0\.1:5173/);
+  assert.match(envExample, /^BETTER_AUTH_URL=http:\/\/localhost:5173$/m);
+});
+
 test('Windows startup rejects an occupied port before launching and leaves its listener intact', { skip: process.platform !== 'win32' }, async () => {
   const listener = net.createServer(socket => socket.end());
   await new Promise((resolve, reject) => { listener.once('error', reject); listener.listen(0, '127.0.0.1', resolve); });

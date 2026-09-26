@@ -36,6 +36,24 @@ test('governance: admin-only writes, origin, validation and self protection', as
   assert.equal((await request('/api/admin/users/user/governance?actor=admin')).status, 422);
 });
 
+test('governance: single-character reasons are accepted, trimmed and bounded', async t => {
+  const { request, change } = await fixture(t);
+  for (const reason of ['', '   ', 'x'.repeat(501), 'test\nreason', '\u0000']) {
+    assert.equal((await change('user', 'banned', 0, 'admin', { reason })).status, 422);
+  }
+  assert.equal((await change('user', 'banned', 0, 'admin', { reason: '1' })).status, 200);
+  let history = await (await request('/api/admin/users/user/governance')).json();
+  assert.equal(history.items.length, 1);
+  assert.equal(history.items[0].reason, '1');
+  assert.equal((await change('user', 'active', 1, 'admin', { reason: ' 1 ' })).status, 200);
+  history = await (await request('/api/admin/users/user/governance')).json();
+  assert.equal(history.items[0].reason, '1');
+  assert.equal((await change('user', 'suspended', 2, 'admin', { reason: 'x'.repeat(500) })).status, 200);
+  history = await (await request('/api/admin/users/user/governance')).json();
+  assert.equal(history.items.length, 3);
+  assert.equal(history.items[0].reason.length, 500);
+});
+
 test('governance: versioning, idempotency, audit, suspension reads and universal write gate', async t => {
   const { request, change } = await fixture(t);
   const requestId = randomUUID();

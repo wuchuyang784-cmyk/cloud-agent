@@ -124,7 +124,7 @@ try {
         }
         Write-Step ("数据库状态：" + $health.database) 'Green'
     }
-    if ($Target -ne 'api') { Write-Step '访问 http://127.0.0.1:5173' 'Green' }
+    if ($Target -ne 'api') { Write-Step '访问 http://localhost:5173' 'Green' }
     Write-Step '服务已就绪，按 Ctrl+C 停止全部服务。' 'Green'
     while (@($children | Where-Object { -not $_.HasExited }).Count -eq $children.Count) { Start-Sleep -Seconds 1 }
     Write-Step '服务退出，正在停止其余服务' 'Yellow'

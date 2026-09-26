@@ -57,6 +57,8 @@ tbody tr:hover { background: #fafbfd; }
 .governance-dialog form { display: grid; gap: 12px; margin: 18px 0; }
 .governance-dialog label { display: grid; gap: 8px; }
 .governance-dialog textarea { width: 100%; resize: vertical; font: inherit; border: 1px solid #dce0e6; border-radius: 4px; padding: 10px; }
+.governance-dialog textarea[aria-invalid="true"] { border-color: #bc4337; }
+.governance-validation { min-height: 22px; line-height: 1.7; overflow-wrap: anywhere; }
 .governance-impact { font-size: 13px; color: #6e7886; margin: 0; line-height: 1.7; }
 .governance-success { color: #237e5a; font-size: 13px; }
 .governance-history { border-top: 1px solid #e2e5eb; margin-top: 18px; padding-top: 12px; }

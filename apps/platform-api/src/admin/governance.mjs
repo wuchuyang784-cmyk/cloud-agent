@@ -94,7 +94,7 @@ export async function handleGovernance({ request, response, url, actor, target, 
     catch (error) { return fail(error.message === 'payload_too_large' ? 413 : 400, error.message === 'payload_too_large' ? 'payload_too_large' : 'invalid_json'); }
     if (!input || Array.isArray(input) || Object.keys(input).some(k => !['status', 'expectedVersion', 'reason', 'requestId'].includes(k))
       || !['active', 'suspended', 'banned'].includes(input.status) || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0
-      || typeof input.reason !== 'string' || input.reason.trim().length < 2 || input.reason.length > 500 || /[\x00-\x1f\x7f]/.test(input.reason)
+      || typeof input.reason !== 'string' || input.reason.trim().length < 1 || input.reason.length > 500 || /[\x00-\x1f\x7f]/.test(input.reason)
       || typeof input.requestId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.requestId)) return fail(422, 'invalid_governance_input');
     result = await changeGovernance(store, actor, target, { ...input, reason: input.reason.trim(), requestId: input.requestId.toLowerCase() });
   } else { response.setHeader('allow', 'GET, POST'); return fail(405, 'method_not_allowed'); }
