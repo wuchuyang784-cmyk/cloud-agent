@@ -1,8 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
-import { ArrowLeft, ArrowRight, Bot, ChevronLeft, ChevronRight, CircleAlert, LogOut, RefreshCw, Search, Server, ShieldCheck, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bot, ChevronLeft, ChevronRight, CircleAlert, LogOut, RefreshCw, Search, ShieldCheck, Users } from 'lucide-react';
 import { AdminSession } from './session';
-import { InfrastructureView } from './InfrastructureView';
 import { GovernanceDialog, accountLabels } from './GovernanceDialog';
 import type { Query, Row, View } from './session';
 
@@ -43,7 +42,7 @@ export function App() {
   const [draft, setDraft] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const view = query.view;
-  const title = view === 'users' ? '用户账号' : view === 'agents' ? 'Agent 服务' : '服务器资源';
+  const title = view === 'users' ? '用户账号' : 'Agent 服务';
   useEffect(() => { void model.load(query); return model.cancel; }, [query]);
   useEffect(() => {
     const refresh = () => { if (document.visibilityState === 'visible' && model.getSnapshot().phase === 'ready' && !model.getSnapshot().governance) void model.load(query); };
@@ -71,8 +70,7 @@ export function App() {
     <aside className="sidebar">
       <div className="brand"><ShieldCheck size={27} /><div><strong>百睿云</strong><span>管理端</span></div></div>
       <nav aria-label="管理端导航"><button aria-current={view === 'users' ? 'page' : undefined} onClick={() => switchView('users')}><Users size={18} /> 用户账号</button>
-        <button aria-current={view === 'agents' ? 'page' : undefined} onClick={() => switchView('agents')}><Bot size={18} /> Agent 服务</button>
-        <button aria-current={view === 'infrastructure' ? 'page' : undefined} onClick={() => switchView('infrastructure')}><Server size={18} /> 服务器资源</button></nav>
+        <button aria-current={view === 'agents' ? 'page' : undefined} onClick={() => switchView('agents')}><Bot size={18} /> Agent 服务</button></nav>
       <a className="client-link" href="/"><ArrowLeft size={16} /> 客户端</a>
     </aside>
     <div className="workspace"><header className="topbar"><span className="topbar-label">平台管理</span><div className="identity">
@@ -81,7 +79,6 @@ export function App() {
     </div></header>
     <main className="content" aria-busy={busy}>
       <div className="page-heading"><div><div className="breadcrumb">平台 / {title}</div><h1>{title}</h1></div><span className="read-label">{view === 'users' && state.me?.permissions.includes('users:govern') ? '账号治理' : '只读'}</span></div>
-      {view === 'infrastructure' ? <InfrastructureView data={state.infrastructure} busy={busy} updatedAt={state.updatedAt} refresh={() => void model.load(query)} /> : <>
       <form className="toolbar" onSubmit={e => { e.preventDefault(); reset({ ...query, q: draft.trim() }); }}>
         <div className="search-field"><Search size={17} /><input aria-label="搜索" maxLength={200} placeholder={view === 'users' ? '搜索邮箱、名称或用户 ID' : '搜索名称、邮箱或 Agent ID'} value={draft} onChange={e => setDraft(e.target.value)} /><button type="submit" className="icon-button" aria-label="执行搜索" title="搜索"><ArrowRight size={16} /></button></div>
         {view === 'agents' && <select aria-label="记录状态" value={query.status || ''} onChange={e => reset({ ...query, status: e.target.value })}><option value="">全部记录状态</option>{Object.entries(labels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select>}
@@ -92,7 +89,6 @@ export function App() {
         <tbody>{!busy && state.items.map(row => view === 'users' ? <UserRow key={row.id} row={row} showAgents={id => { setDraft(''); reset({ view: 'agents', ownerUserId: id }); }} /> : <AgentRow key={row.id} row={row} />)}
           {(busy || state.items.length === 0) && <tr><td colSpan={view === 'users' ? 6 : 5}><div className="empty" role="status">{busy ? <RefreshCw className="spin" size={24} /> : view === 'users' ? <Users size={28} /> : <Bot size={28} />}<span>{state.phase === 'signing-out' ? '正在退出' : busy ? '正在读取' : '暂无记录'}</span></div></td></tr>}
         </tbody></table></div>
-      <footer className="pagination"><span>本页 {state.items.length} 条</span><div><label>每页 <select aria-label="每页条数" value={query.limit} onChange={e => reset({ ...query, limit: e.target.value })}>{['25', '50', '100'].map(n => <option key={n}>{n}</option>)}</select> 条</label><button className="icon-button" title="上一页" aria-label="上一页" disabled={busy || !history.length} onClick={pageBack}><ChevronLeft size={18} /></button><span className="page-number">{history.length + 1}</span><button className="icon-button" title="下一页" aria-label="下一页" disabled={busy || !state.nextCursor} onClick={pageNext}><ChevronRight size={18} /></button></div></footer>
-      </>}
-    </main></div>{state.governance && <GovernanceDialog key={state.governance.target.id} model={model} value={state.governance} canGovern={Boolean(state.me?.permissions.includes('users:govern') && state.me.user.id !== state.governance.target.id)} />}</div>;
+      <footer className="pagination"><span>本页 {state.items.length} 条</span><div><label>每页 <select aria-label="每页条数" value={query.limit} onChange={e => reset({ ...query, limit: e.target.value })}>{['25', '50', '100'].map(n => <option key={n}>{n}</option>)}</select> 条</label><button className="icon-button" title="上一页" aria-label="上一页" disabled={busy || !history.length} onClick={pageBack}><ChevronLeft size={18} /></button><span className="page-number">{history.length + 1}</span>        <button className="icon-button" title="下一页" aria-label="下一页" disabled={busy || !state.nextCursor} onClick={pageNext}><ChevronRight size={18} /></button></div></footer>
+      </main></div>{state.governance && <GovernanceDialog key={state.governance.target.id} model={model} value={state.governance} canGovern={Boolean(state.me?.permissions.includes('users:govern') && state.me.user.id !== state.governance.target.id)} />}</div>;
 }

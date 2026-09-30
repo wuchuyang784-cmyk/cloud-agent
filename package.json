@@ -10,7 +10,6 @@
     "infra:collect": "node --env-file-if-exists=.env.infrastructure scripts/infrastructure-collector.mjs",
     "infra:once": "node --env-file-if-exists=.env.infrastructure scripts/infrastructure-collector.mjs --once",
     "test:infrastructure": "node scripts/test-scheduler.mjs --infrastructure",
-    "test:infrastructure:web": "node scripts/test-infrastructure-browser.mjs",
     "monitor:up": "node scripts/monitoring.mjs up",
     "monitor:status": "node scripts/monitoring.mjs status",
     "monitor:stop": "node scripts/monitoring.mjs stop",

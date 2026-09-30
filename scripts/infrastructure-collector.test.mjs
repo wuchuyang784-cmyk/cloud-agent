@@ -49,21 +49,16 @@ test('Swarm accounting separates capacity, active reservations, limits and unass
   assert.throws(() => summarizeSwarm(Array(33).fill(nodes[0]), services, tasks));
 });
 
-test('snapshot projection drops metadata and distinguishes stale, missing and invalid samples', async () => {
-  const { projectInfrastructure } = await import('../apps/platform-api/src/admin/infrastructure.mjs');
-  const now = Date.now();
-  const payload = { version: 1, sampledAt: new Date(now).toISOString(),
+test('snapshot normalization rebuilds selected fields only and rejects out-of-range values', async () => {
+  const { normalizeSnapshot } = await import('./infrastructure-snapshot.mjs');
+  const payload = { version: 1, sampledAt: new Date().toISOString(),
     host: { platform: 'win32', cpuCount: 4, cpuPercent: 15, memoryTotalBytes: 16000, memoryUsedBytes: 8000, secret: 'never-return' },
     swarm: { status: 'unavailable', nodes: [], services: [], metadata: 'never-return' } };
-  const source = { sourceId: 'local', label: 'Local', sampledAt: payload.sampledAt, receivedAt: payload.sampledAt, payload };
-  const result = projectInfrastructure({ items: [source] }, now);
-  assert.equal(result.items[0].status, 'fresh');
-  assert.equal(JSON.stringify(result).includes('never-return'), false);
-  assert.equal(projectInfrastructure({ items: [source] }, now + 91000).items[0].status, 'stale');
-  assert.equal(projectInfrastructure({ items: [{ sourceId: 'none', label: 'None', payload: null }] }, now).items[0].status, 'waiting');
-  payload.host.cpuPercent = 101;
-  assert.equal(projectInfrastructure({ items: [source] }, now).items[0].status, 'invalid');
-  assert.equal(projectInfrastructure({ items: [source] }, now).items[0].snapshot, null);
+  const snapshot = normalizeSnapshot(payload);
+  assert.deepEqual(snapshot.host, { platform: 'win32', cpuCount: 4, cpuPercent: 15, memoryTotalBytes: 16000, memoryUsedBytes: 8000 });
+  assert.equal(JSON.stringify(snapshot).includes('never-return'), false);
+  assert.throws(() => normalizeSnapshot({ ...payload, host: { ...payload.host, cpuPercent: 101 } }));
+  assert.throws(() => normalizeSnapshot({ ...payload, version: 2 }));
 });
 
 test('collector is opt-in, refuses remote endpoints and inherited DOCKER_HOST before contacting a daemon', async () => {
@@ -104,13 +99,15 @@ test('collector uses selected fields only and never leaks CLI errors or partiall
   assert.equal(inspection.join(' ').includes('ContainerSpec'), false);
 });
 
-test('snapshot validation rejects negative usage, future samples and excessive result cardinality', async () => {
-  const { normalizeSnapshot, projectInfrastructure } = await import('../apps/platform-api/src/admin/infrastructure.mjs');
+test('snapshot validation rejects negative usage, over-capacity memory and excessive cardinality', async () => {
+  const { normalizeSnapshot } = await import('./infrastructure-snapshot.mjs');
   const sample = { version: 1, sampledAt: new Date().toISOString(), host: { platform: 'win32', cpuCount: 4, cpuPercent: null, memoryTotalBytes: 16000, memoryUsedBytes: 8000 }, swarm: { status: 'disabled' } };
   assert.throws(() => normalizeSnapshot({ ...sample, host: { ...sample.host, memoryUsedBytes: -1 } }));
   assert.throws(() => normalizeSnapshot({ ...sample, host: { ...sample.host, memoryUsedBytes: 16001 } }));
-  const future = new Date(Date.now() + 60000).toISOString();
-  const source = { sourceId: 'local', label: 'local', sampledAt: future, receivedAt: future, payload: { ...sample, sampledAt: future } };
-  assert.equal(projectInfrastructure({ items: [source] }).items[0].status, 'invalid');
-  assert.throws(() => projectInfrastructure({ items: Array(21).fill(source) }));
+  const node = { id: 'node-a', name: 'linux-vm', state: 'ready', availability: 'active', cpuCores: 4, memoryBytes: 2000, reservedCpuCores: 1,
+    reservedMemoryBytes: 100, limitedCpuCores: 2, limitedMemoryBytes: 200, unlimitedCpuTasks: 0, unlimitedMemoryTasks: 0, activeTasks: 1, runningTasks: 1 };
+  const swarm = { status: 'ok', unassignedTasks: 0, nodes: [node], services: [] };
+  assert.throws(() => normalizeSnapshot({ ...sample, swarm: { ...swarm, nodes: Array(33).fill(node) } }));
+  assert.throws(() => normalizeSnapshot({ ...sample, swarm: { ...swarm, nodes: [node, { ...node, name: 'duplicate' }] } }));
+  assert.equal(normalizeSnapshot({ ...sample, swarm }).swarm.nodes[0].cpuPercent, null);
 });

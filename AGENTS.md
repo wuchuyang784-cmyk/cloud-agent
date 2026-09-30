@@ -35,7 +35,7 @@
 
 ### 双端平台 C 批：管理端服务器资源（2026-09-20，业务库已接入）
 
-- 管理端 `/admin/` 新增“服务器资源”，展示采集主机 CPU 使用率、逻辑 CPU 数、内存，以及 Swarm 节点容量、非终态任务预留/限制、服务副本和未分配任务。客户端不增加跨用户或服务器管理入口。
+- 管理端“服务器资源”页面已于 2026-09-30 移除：删除 `InfrastructureView.tsx`、类型定义、导航入口和样式，后端 `GET /api/admin/infrastructure`、`infrastructure:read` 权限与 `projectInfrastructure` 一并删除。资源展示后续由 Grafana 面板承接；采集链路（035 迁移、采集器、数据库快照与读取函数）保留作为数据来源。客户端仍不增加跨用户或服务器管理入口。
 - 继续不接模型、模型 API 或真实 Agent；平台模式的 Agent 写入和执行保持关闭。复用 Better Auth、显式平台角色和现有管理端，不增加另一套账号系统。
 - 新迁移 `035_platform_infrastructure.sql` 依赖基础表和 034、不依赖 033。两张资源表强制 RLS；应用账号只获读取函数 EXECUTE，独立采集登录账号只获上报函数 EXECUTE，由 DBA 绑定 `session_user` 与采集源。
 - 独立采集进程使用操作系统指标和固定只读 Docker CLI，API 不挂载 docker.sock。入口为 `npm run infra:check`、`npm run infra:once`、`npm run infra:collect`；配置独立保存在已忽略的 `.env.infrastructure`，不复用业务 `.env` 或应用账号。
@@ -45,6 +45,7 @@
 - 用户确认后已备份业务库 `bairui` 并执行 035，配置应用最小读取授权、独立受限采集账号及 `development-host` 源；真实快照入库且经应用投影为 fresh。原管理员授权读取和 4 个普通用户拒绝已验证，不改账号密码或伪造登录会话。
 - 本地开发服务已重启，独立采集进程在 `cloud` 环境启动；凭据仅保留于受限本地配置，不进入 Git。未安装 Windows 开机服务，未修改常驻预发。操作记录和备份在已忽略的 `output/infrastructure-provisioning/20260920/`，不要按历史 PID 盲目停止进程。
 - Linux 原生采集部署说明及 systemd 模板见 docs/41 第 8 节与 `infra/systemd/bairui-infrastructure.service`。服务器需单独迁移授权、每主机独立源和凭据；manager 采集集群，worker 只采主机。模板未在 Linux 实机部署，Docker 权限仍需明确评审。
+- 快照归一化 `normalizeSnapshot` 已从 `apps/platform-api/src/admin/infrastructure.mjs` 迁到 `scripts/infrastructure-snapshot.mjs`，采集器改引用新模块；`npm run test:infrastructure` 只跑采集器测试，`test:infrastructure:web` 浏览器验收脚本已删除。
 - 既有 Prometheus/Grafana 部署、治理封禁、自动扩缩容和真实 Runtime 不属于本批完成范围。
 
 ### 双端平台 B 批：客户端本人 Agent 监控（2026-09-19）

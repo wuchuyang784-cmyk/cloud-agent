@@ -2,7 +2,7 @@ import { readAdmin } from './store.mjs';
 import { handleGovernance } from './governance.mjs';
 
 const statuses = new Set(['uninitialized', 'provisioning', 'starting', 'ready', 'degraded', 'offline', 'failed', 'stopped']);
-const resources = new Set(['me', 'users', 'agents', 'infrastructure']);
+const resources = new Set(['me', 'users', 'agents']);
 
 export async function handleAdmin({ request, response, url, principal, store, enabled, sendJson, sendError, requestId, env, readJson }) {
   const fail = (status, code) => sendError(response, status, code, code, requestId);
@@ -22,7 +22,7 @@ export async function handleAdmin({ request, response, url, principal, store, en
       response.setHeader('allow', 'GET');
       return fail(405, 'method_not_allowed');
     }
-    const allowed = ['me', 'infrastructure'].includes(resource) ? [] : ['q', 'after', 'limit', ...(resource === 'agents' ? ['ownerUserId', 'status'] : [])];
+    const allowed = resource === 'me' ? [] : ['q', 'after', 'limit', ...(resource === 'agents' ? ['ownerUserId', 'status'] : [])];
     for (const key of url.searchParams.keys()) {
       if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) return fail(422, 'invalid_admin_query');
     }

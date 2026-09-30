@@ -1,5 +1,4 @@
-import type { Infrastructure } from './infrastructure';
-export type View = 'users' | 'agents' | 'infrastructure';
+export type View = 'users' | 'agents';
 export type Query = { view: View; q?: string; after?: string; limit?: string; ownerUserId?: string; status?: string };
 export type Row = { id: string; email?: string; displayName?: string | null; createdAt?: string | null;
   authLinked?: boolean; name?: string; ownerUserId?: string; ownerEmail?: string; status?: string; engine?: string; updatedAt?: string; account?: AccountState };
@@ -9,7 +8,7 @@ export type Governance = { target: Row; account: AccountState | null; items: { i
   nextCursor: string | null; busy: boolean; error: string; success: string; retry: Command | null };
 export type Identity = { role: string; permissions: string[]; user: { id: string; email: string } };
 export type Phase = 'loading' | 'ready' | 'login' | 'denied' | 'error' | 'signing-out' | 'logout-error';
-export type Snapshot = { phase: Phase; me: Identity | null; items: Row[]; nextCursor: string | null; infrastructure: Infrastructure | null; error: string; updatedAt: number | null; governance: Governance | null };
+export type Snapshot = { phase: Phase; me: Identity | null; items: Row[]; nextCursor: string | null; error: string; updatedAt: number | null; governance: Governance | null };
 type Transport = (path: string, init?: RequestInit) => Promise<Response>;
 
 class HttpError extends Error {
@@ -20,7 +19,7 @@ class HttpError extends Error {
 
 export class AdminSession {
   private transport: Transport;
-  private state: Snapshot = { phase: 'loading', me: null, items: [], nextCursor: null, infrastructure: null, error: '', updatedAt: null, governance: null };
+  private state: Snapshot = { phase: 'loading', me: null, items: [], nextCursor: null, error: '', updatedAt: null, governance: null };
   private detailGeneration = 0;
   private listeners = new Set<() => void>();
   private generation = 0;
@@ -39,7 +38,7 @@ export class AdminSession {
     this.abort = new AbortController();
     const generation = ++this.generation;
     this.detailGeneration++;
-    this.publish({ phase, me: null, items: [], nextCursor: null, infrastructure: null, error: '', updatedAt: null, governance: null });
+    this.publish({ phase, me: null, items: [], nextCursor: null, error: '', updatedAt: null, governance: null });
     return { generation, signal: this.abort.signal };
   }
   cancel = () => { if (!this.locked) { this.generation++; this.abort.abort(); } };
@@ -62,7 +61,7 @@ export class AdminSession {
     if (generation !== this.generation) return;
     const code = error instanceof HttpError ? error.status : 0;
     const phase = code === 401 ? 'login' : code === 403 ? 'denied' : signingIn ? 'login' : 'error';
-    this.publish({ phase, me: null, items: [], nextCursor: null, infrastructure: null, updatedAt: null, governance: null,
+    this.publish({ phase, me: null, items: [], nextCursor: null, updatedAt: null, governance: null,
       error: code === 429 ? '请求过于频繁，请稍后再试。' : code === 401 ? (signingIn ? '邮箱或密码错误。' : '') : code === 403 ? '当前账号没有平台管理权限。' : '请求未完成，请稍后重试。' });
   }
   private async read(query: Query, generation: number, signal: AbortSignal) {
@@ -70,14 +69,6 @@ export class AdminSession {
     if (generation !== this.generation) return;
     if (!['platform_viewer', 'platform_operator', 'platform_admin'].includes(me.role)
       || !me.permissions?.includes(query.view + ':read') || !me.user?.id) throw new HttpError(403);
-    if (query.view === 'infrastructure') {
-      const infrastructure = await this.json('/api/admin/infrastructure', signal) as Infrastructure;
-      if (generation !== this.generation) return;
-      if (!Array.isArray(infrastructure.items) || infrastructure.items.length > 20
-        || !Number.isFinite(Date.parse(infrastructure.observedAt)) || infrastructure.staleAfterSeconds !== 90) throw new Error('invalid_infrastructure');
-      this.publish({ phase: 'ready', me, infrastructure, items: [], nextCursor: null, error: '', updatedAt: Date.now() });
-      return;
-    }
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) if (key !== 'view' && value) params.set(key, value);
     const page = await this.json('/api/admin/' + query.view + '?' + params, signal);

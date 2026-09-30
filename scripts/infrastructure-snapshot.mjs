@@ -7,7 +7,7 @@ const list = (value, max, project) => Array.isArray(value) && value.length <= ma
 const date = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : fail();
 const optional = (value, check) => value === null ? null : check(value);
 
-// Rebuild the public contract; stored JSON is never forwarded verbatim.
+// Rebuild the stored contract; collected JSON is never forwarded verbatim.
 export function normalizeSnapshot(input) {
   if (input?.version !== 1) fail();
   const h = input.host;
@@ -32,18 +32,4 @@ export function normalizeSnapshot(input) {
     if (new Set(swarm.nodes.map(n => n.id)).size !== swarm.nodes.length || new Set(swarm.services.map(s => s.id)).size !== swarm.services.length) fail();
   }
   return { version: 1, sampledAt: date(input.sampledAt), host, swarm };
-}
-
-export function projectInfrastructure(raw, now = Date.now()) {
-  return { observedAt: new Date(now).toISOString(), staleAfterSeconds: 90, truncated: raw.truncated === true,
-    items: list(raw.items, 20, source => {
-      const item = { sourceId: text(source.sourceId, 80), label: text(source.label, 100), status: 'waiting', sampledAt: null, receivedAt: null, snapshot: null };
-      if (source.payload == null) return item;
-      try {
-        const snapshot = normalizeSnapshot(source.payload);
-        const sampledAt = date(source.sampledAt), receivedAt = date(source.receivedAt);
-        if (sampledAt !== snapshot.sampledAt || Date.parse(sampledAt) > now + 10000 || Date.parse(receivedAt) > now + 10000) fail();
-        return { ...item, snapshot, sampledAt, receivedAt, status: now - Math.min(Date.parse(sampledAt), Date.parse(receivedAt)) > 90000 ? 'stale' : 'fresh' };
-      } catch { return { ...item, status: 'invalid' }; }
-    }) };
 }

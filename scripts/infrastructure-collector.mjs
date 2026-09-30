@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { normalizeSnapshot } from '../apps/platform-api/src/admin/infrastructure.mjs';
+import { normalizeSnapshot } from './infrastructure-snapshot.mjs';
 
 const exec = promisify(execFile);
 const terminal = new Set(['complete', 'shutdown', 'failed', 'rejected', 'remove', 'orphaned']);

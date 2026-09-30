@@ -43,34 +43,6 @@ test('governance UI: logout and navigation clear sensitive detail and ignore lat
   assert.equal(model.getSnapshot().governance, null);
 });
 
-test('infrastructure UI: dedicated permission, no list query, clear telemetry on logout and ignore late responses', async () => {
-  const pending = deferred(), calls = [];
-  const model = new AdminSession(async path => {
-    calls.push(path);
-    return path === '/api/admin/me' ? response({ ...me, permissions: [...me.permissions, 'infrastructure:read'] })
-      : path.includes('sign-out') ? response({}) : pending.promise;
-  });
-  const load = model.load({ view: 'infrastructure', limit: '25', q: 'old-user-query' });
-  await new Promise(r => setImmediate(r));
-  assert.equal(calls[1], '/api/admin/infrastructure');
-  await model.signOut();
-  pending.resolve(response({ items: [], observedAt: new Date().toISOString(), staleAfterSeconds: 90, truncated: false }));
-  await load;
-  assert.equal(model.getSnapshot().infrastructure, null);
-  assert.equal(model.getSnapshot().phase, 'login');
-});
-
-test('infrastructure UI: resource payload kept separate from account rows, cleared when changing view', async () => {
-  const payload = { items: [], observedAt: new Date().toISOString(), staleAfterSeconds: 90, truncated: false };
-  const model = new AdminSession(async path => response(path === '/api/admin/me'
-    ? { ...me, permissions: [...me.permissions, 'infrastructure:read'] } : path.includes('infrastructure') ? payload : { items: [], nextCursor: null }));
-  await model.load({ view: 'infrastructure' });
-  assert.equal(model.getSnapshot().phase, 'ready');
-  assert.deepEqual(model.getSnapshot().infrastructure, payload);
-  await model.load({ view: 'users' });
-  assert.equal(model.getSnapshot().infrastructure, null);
-});
-
 test('admin UI: stalled requests time out and cannot repopulate protected state', async () => {
   const pending = deferred();
   const model = new AdminSession(async () => pending.promise, 20);
