@@ -27,6 +27,7 @@ test('PostgreSQL scheduler: 10 tenants/50 tasks, two replicas, RLS, leases and p
     }
     await admin.query('GRANT USAGE ON SCHEMA ' + schema + ' TO ' + role);
     await admin.query('GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA ' + schema + ' TO ' + role);
+    await admin.query('GRANT EXECUTE ON FUNCTION ' + schema + '.platform_scheduler_account_access(text) TO ' + role);
     const options = { connectionString, max: 6, options: '-c search_path=' + schema + ',public -c role=' + role };
     p1 = new Pool(options); p2 = new Pool(options);
     const privilege = (await p1.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0];

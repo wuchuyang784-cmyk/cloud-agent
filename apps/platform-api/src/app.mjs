@@ -614,7 +614,10 @@ export function createApp(options = {}) {
     } catch (caught) {
       if (caught instanceof GovernanceError) return sendError(response, caught.status, caught.code, caught.code, requestId);
       if (caught.message === 'invalid_client_ip') return sendError(response, 400, 'invalid_client_ip', 'Invalid client address', requestId);
-      if (caught instanceof TaskError) return sendError(response, caught.code === 'queue_full' ? 429 : caught.code === 'idempotency_conflict' ? 409 : 422, caught.code, caught.code, requestId);
+      if (caught instanceof TaskError) {
+        const taskStatus = caught.code === 'queue_full' ? 429 : caught.code === 'idempotency_conflict' ? 409 : ['account_suspended', 'account_banned'].includes(caught.code) ? 403 : caught.code === 'governance_unavailable' ? 503 : 422;
+        return sendError(response, taskStatus, caught.code, caught.code, requestId);
+      }
       if (caught.message === 'identity_link_required') return sendError(response, 409, 'identity_link_required', 'Account migration requires verified identity linking', requestId);
       if (caught.message === 'invalid_json') return sendError(response, 400, 'invalid_json', 'Request body must be valid JSON', requestId);
       if (caught.message === 'payload_too_large') return sendError(response, 413, 'payload_too_large', 'Request body is too large', requestId);

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocker, names, label, origin, apiImage, webImage, bootstrapName, missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
 import { monitorNames } from './monitoring-config.mjs';
+import { runWithKeepAlive } from './cli-keepalive.mjs';
 
 // This entry point deliberately never loads .env or accepts a database URL.
 export const root = fileURLToPath(new URL('../', import.meta.url));
@@ -315,5 +316,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const command = process.argv[2];
   const action = { up, status, stop }[command];
   if (!action) { console.error('用法：node scripts/preprod.mjs up|status|stop'); process.exitCode = 1; }
-  else await withLock(action).catch(error => { console.error(error.message); process.exitCode = 1; });
+  else await runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

@@ -23,7 +23,7 @@ test('infrastructure PostgreSQL: independent writer identity, two APIs, RLS, rep
     for (const identity of [secondLogin, unknownLogin]) await owner.query(`CREATE ROLE ${identity} LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS PASSWORD '${password}'`);
     elevated = new Pool({ connectionString, options: '-c search_path=' + schema + ',public' });
     const migrations = new URL('../../../packages/db/migrations/', import.meta.url);
-    for (const name of (await readdir(migrations)).filter(n => n.endsWith('.sql') && !n.startsWith('033')).sort()) {
+    for (const name of (await readdir(migrations)).filter(n => n.endsWith('.sql') && !n.startsWith('033') && !n.startsWith('038')).sort()) {
       await elevated.query(await readFile(new URL(name, migrations), 'utf8'));
     }
     await elevated.query('GRANT USAGE ON SCHEMA ' + schema + ' TO ' + [role, login, secondLogin, unknownLogin].join(','));

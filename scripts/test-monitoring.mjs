@@ -7,6 +7,7 @@ import { names, apiImage } from './preprod-config.mjs';
 import { monitorNames, monitorServices, monitorSecrets, monitorImages, monitorOrigin } from './monitoring-config.mjs';
 import { assertMonitoringResources, alertRecords, grafanaPassword } from './monitoring.mjs';
 import { validateMonitoring } from './monitoring-rules.test.mjs';
+import { runWithKeepAlive } from './cli-keepalive.mjs';
 
 const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomBytes(3).toString('hex');
 const report = { runId, success: false, startedAt: new Date().toISOString(), checks: [] };
@@ -134,7 +135,7 @@ async function verify() {
   report.success = true;
 }
 
-await withLock(async () => {
+await runWithKeepAlive(() => withLock(async () => {
   try { await verify(); }
   catch (error) { report.success = false; report.error = error.message; console.error('监控验收失败：' + error.message); process.exitCode = 1; }
   finally {
@@ -143,4 +144,4 @@ await withLock(async () => {
     await writeFile(path, JSON.stringify(report, null, 2) + '\n');
     console.log('脱敏验收报告：' + path);
   }
-}).catch(error => { console.error(error.message); process.exitCode = 1; });
+})).catch(error => { console.error(error.message); process.exitCode = 1; });

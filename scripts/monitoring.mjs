@@ -8,6 +8,7 @@ import { docker, owned, loadState, saveState, localDocker, checkResources, outpu
 import { label, names, apiImage } from './preprod-config.mjs';
 import { monitoringStack, monitoringAssets, monitorNames, monitorVolumes, monitorSecrets, monitorServices, monitorImages, monitorConfigName, monitoringRevision, monitorOrigin } from './monitoring-config.mjs';
 import { validateMonitoring } from './monitoring-rules.test.mjs';
+import { runWithKeepAlive } from './cli-keepalive.mjs';
 
 // Monitoring shares the installation lock and never consumes the business .env.
 export async function assertMonitoringResources(state, { requirePersistent = true } = {}) {
@@ -88,13 +89,23 @@ async function context() {
   return state;
 }
 
+export async function ensureMonitoringImages() {
+  for (const image of Object.values(monitorImages)) {
+    try {
+      await docker(['image', 'inspect', image]);
+      console.log('使用本地固定监控镜像：' + image);
+    } catch (error) {
+      if (!error.notFound) throw error;
+      console.log('准备固定监控镜像：' + image);
+      await docker(['pull', image], { timeout: 600000, logFile: join(output, 'pull-' + image.split('/')[1].replace(':', '-') + '.log') });
+    }
+  }
+}
 export async function monitorUp() {
   const state = await context();
   await assertMonitoringResources(state, { requirePersistent: Boolean(state.monitoring?.resourcesReady) });
-  for (const image of Object.values(monitorImages)) {
-    console.log('准备固定监控镜像：' + image);
-    await docker(['pull', image], { timeout: 600000, logFile: join(output, 'pull-' + image.split('/')[1].replace(':', '-') + '.log') });
-  }
+  await ensureMonitoringImages();
+
   await validateMonitoring();
   await ensureMonitoringResources(state);
   state.monitoring.enabled = true;
@@ -172,5 +183,5 @@ async function monitorPassword() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const action = { up: monitorUp, status: monitorStatus, stop: monitorStop, alerts: monitorAlerts, password: monitorPassword }[process.argv[2]];
   if (!action) { console.error('用法：node scripts/monitoring.mjs up|status|stop|alerts|password'); process.exitCode = 1; }
-  else await withLock(action).catch(error => { console.error(error.message); process.exitCode = 1; });
+  else await runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

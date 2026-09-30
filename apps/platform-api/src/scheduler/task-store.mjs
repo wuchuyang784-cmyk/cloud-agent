@@ -12,11 +12,62 @@ export class TaskError extends Error {
 
 // Both stores run the same transitions; PostgreSQL holds a short global decision lock.
 class TaskStore {
+  constructor({ governance } = {}) { this.governance = governance; }
+
+  async governanceFor(userId, context) {
+    const cache = context?.governanceCache;
+    if (cache?.has(userId)) return cache.get(userId);
+    try {
+      const value = this.governance
+        ? await this.governance.get(userId, context)
+        : context?.query
+          ? (await context.query('SELECT platform_scheduler_account_access($1) AS result', [userId])).rows[0]?.result
+          : { status: 'active', version: 0 };
+      if (!value || !['active', 'suspended', 'banned'].includes(value.status) || !Number.isSafeInteger(value.version) || value.version < 0) {
+        throw new Error('invalid_account_state');
+      }
+      cache?.set(userId, value);
+      return value;
+    } catch (error) {
+      if (error instanceof TaskError) throw error;
+      throw new TaskError('governance_unavailable');
+    }
+  }
+
+  async requireActive(scope, context) {
+    const account = await this.governanceFor(scope.userId, context);
+    if (account.status !== 'active') throw new TaskError('account_' + account.status);
+    return account;
+  }
+
+  async reconcileGovernance(state, now, context) {
+    const owners = new Map();
+    for (const task of state.tasks) {
+      if (!active(task)) continue;
+      if (!owners.has(task.userId)) owners.set(task.userId, []);
+      owners.get(task.userId).push(task);
+    }
+    for (const [userId, tasks] of owners) {
+      const account = await this.governanceFor(userId, context);
+      for (const task of tasks) {
+        if (account.status === 'active' && account.version === task.governanceVersion) continue;
+        const cancelReason = account.status === 'banned'
+          ? 'account_banned'
+          : account.status === 'suspended'
+            ? 'account_suspended'
+            : 'governance_changed';
+        Object.assign(task, { status: 'cancelled', cancelReason, cancelledAt: now, workerId: null, leaseUntil: null, updatedAt: now });
+      }
+    }
+  }
+
   async submit(scope, key, input) {
     if (!scope?.userId || !scope?.organizationId || typeof key !== 'string' || !key.trim() || key.length > 128 ||
         !input || !Number.isInteger(input.durationMs) || input.durationMs < 2000 || input.durationMs > 5000 ||
         !['success', 'failure'].includes(input.outcome)) throw new TaskError('invalid_task');
-    return this.mutate({ scope, key }, (state, now) => {
+    return this.mutate({ scope, key }, async (state, now, context) => {
+      const account = await this.requireActive(scope, context);
+      await this.reconcileGovernance(state, now, context);
       const existing = state.tasks.find(t => owns(scope, t) && t.key === key);
       if (existing) {
         if (existing.durationMs !== input.durationMs || existing.outcome !== input.outcome) throw new TaskError('idempotency_conflict');
@@ -25,7 +76,8 @@ class TaskStore {
       const queued = state.tasks.filter(t => t.status === 'queued');
       if (queued.length >= TASK_LIMITS.queueGlobal || queued.filter(t => t.userId === scope.userId).length >= TASK_LIMITS.queueUser) throw new TaskError('queue_full');
       const task = { id: randomUUID(), ...scope, key, durationMs: input.durationMs, outcome: input.outcome,
-        status: 'queued', attempt: 0, workerId: null, leaseUntil: null, createdAt: now, updatedAt: now };
+        status: 'queued', attempt: 0, governanceVersion: account.version, workerId: null, leaseUntil: null,
+        cancelReason: null, cancelledAt: null, createdAt: now, updatedAt: now };
       state.tasks.push(task);
       return clone(task);
     });
@@ -33,7 +85,8 @@ class TaskStore {
 
   async claim(workerId) {
     if (typeof workerId !== 'string' || !workerId || workerId.length > 128) throw new TaskError('invalid_worker');
-    return this.mutate({}, (state, now) => {
+    return this.mutate({}, async (state, now, context) => {
+      await this.reconcileGovernance(state, now, context);
       const running = state.tasks.filter(t => t.status === 'running');
       if (running.length >= TASK_LIMITS.global || running.filter(t => t.workerId === workerId).length >= TASK_LIMITS.worker) return null;
       const eligible = state.tasks.filter(t => t.status === 'queued' && running.filter(r => r.userId === t.userId).length < TASK_LIMITS.user);
@@ -52,7 +105,8 @@ class TaskStore {
     return this.workerChange(claim, status);
   }
   async workerChange(claim, status) {
-    return this.mutate({ id: claim.id }, (state, now) => {
+    return this.mutate({ id: claim.id }, async (state, now, context) => {
+      await this.reconcileGovernance(state, now, context);
       const t = state.tasks.find(t => t.id === claim.id);
       if (!t || t.status !== 'running' || t.workerId !== claim.workerId || t.attempt !== claim.attempt || t.leaseUntil <= now) return false;
       t.updatedAt = now;
@@ -62,10 +116,12 @@ class TaskStore {
     });
   }
   async cancel(scope, id) {
-    return this.mutate({ scope, id }, (state, now) => {
+    return this.mutate({ scope, id }, async (state, now, context) => {
+      await this.requireActive(scope, context);
+      await this.reconcileGovernance(state, now, context);
       const t = state.tasks.find(t => t.id === id && owns(scope, t));
       if (!t) return null;
-      if (active(t)) Object.assign(t, { status: 'cancelled', workerId: null, leaseUntil: null, updatedAt: now });
+      if (active(t)) Object.assign(t, { status: 'cancelled', cancelReason: 'user_requested', cancelledAt: now, workerId: null, leaseUntil: null, updatedAt: now });
       return clone(t);
     });
   }
@@ -78,21 +134,37 @@ function recover(state, now) {
 }
 
 export class MemoryTaskStore extends TaskStore {
-  constructor({ clock = Date.now } = {}) { super(); this.clock = clock; this.state = { tasks: [], served: {} }; }
+  constructor({ clock = Date.now, governance } = {}) {
+    super({ governance });
+    this.clock = clock;
+    this.state = { tasks: [], served: {} };
+    this.mutationQueue = Promise.resolve();
+  }
   async mutate(filter, fn) {
-    const state = clone(this.state), now = this.clock();
-    recover(state, now);
-    const result = fn(state, now);
-    this.state = state;
-    return result;
+    const run = this.mutationQueue.then(async () => {
+      const state = clone(this.state), now = this.clock();
+      recover(state, now);
+      const result = await fn(state, now, { governanceCache: new Map() });
+      this.state = state;
+      return result;
+    });
+    this.mutationQueue = run.catch(() => {});
+    return run;
   }
   async get(scope, id) { return clone(this.state.tasks.find(t => t.id === id && owns(scope, t)) ?? null); }
   async list(scope) { return clone(this.state.tasks.filter(t => owns(scope, t)).sort((a,b) => b.createdAt-a.createdAt || b.id.localeCompare(a.id)).slice(0,100)); }
 }
 
-const fromRow = ({ organization_id, user_id, ...row }) => ({ ...row, organizationId: organization_id, userId: user_id });
+const fromRow = ({ organization_id, user_id, governance_version, cancel_reason, cancelled_at, ...row }) => ({
+  ...row,
+  organizationId: organization_id,
+  userId: user_id,
+  governanceVersion: governance_version,
+  cancelReason: cancel_reason,
+  cancelledAt: cancelled_at == null ? null : new Date(cancelled_at).getTime(),
+});
 export class PostgresTaskStore extends TaskStore {
-  constructor(pool) { super(); this.pool = pool; }
+  constructor(pool, { governance } = {}) { super({ governance }); this.pool = pool; }
   async scoped(scope, fn) {
     const c = await this.pool.connect();
     let releaseError;
@@ -114,6 +186,7 @@ export class PostgresTaskStore extends TaskStore {
       await c.query('BEGIN');
       await c.query("SET LOCAL lock_timeout='5s'");
       await c.query("SELECT pg_advisory_xact_lock(734033),set_config('app.simulation_worker','on',true)");
+      const context = { query: c.query.bind(c), governanceCache: new Map() };
       const now = Number((await c.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS now')).rows[0].now);
       const rows = (await c.query(
         `SELECT * FROM simulation_tasks WHERE status IN ('queued','running') OR id=$1 OR (organization_id=$2 AND user_id=$3 AND "key"=$4)`,
@@ -124,11 +197,11 @@ export class PostgresTaskStore extends TaskStore {
       }
       const state = { tasks: rows, served }, before = new Map(rows.map(t => [t.id,JSON.stringify(t)])), oldServed = {...served};
       recover(state,now);
-      const result = fn(state,now);
+      const result = await fn(state,now,context);
       for (const t of state.tasks) {
         if (before.get(t.id) === JSON.stringify(t)) continue;
-        await c.query('INSERT INTO simulation_tasks (id,organization_id,user_id,"key","durationMs",outcome,status,attempt,"workerId","leaseUntil","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,attempt=EXCLUDED.attempt,"workerId"=EXCLUDED."workerId","leaseUntil"=EXCLUDED."leaseUntil","updatedAt"=EXCLUDED."updatedAt"',
-          [t.id,t.organizationId,t.userId,t.key,t.durationMs,t.outcome,t.status,t.attempt,t.workerId,t.leaseUntil,t.createdAt,t.updatedAt]);
+        await c.query('INSERT INTO simulation_tasks (id,organization_id,user_id,"key","durationMs",outcome,status,attempt,governance_version,"workerId","leaseUntil",cancel_reason,cancelled_at,"createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,attempt=EXCLUDED.attempt,governance_version=EXCLUDED.governance_version,"workerId"=EXCLUDED."workerId","leaseUntil"=EXCLUDED."leaseUntil",cancel_reason=EXCLUDED.cancel_reason,cancelled_at=EXCLUDED.cancelled_at,"updatedAt"=EXCLUDED."updatedAt"',
+          [t.id,t.organizationId,t.userId,t.key,t.durationMs,t.outcome,t.status,t.attempt,t.governanceVersion,t.workerId,t.leaseUntil,t.cancelReason,t.cancelledAt == null ? null : new Date(t.cancelledAt),t.createdAt,t.updatedAt]);
       }
       for (const [key,value] of Object.entries(served)) if (oldServed[key] !== value) {
         const [org,user] = JSON.parse(key);

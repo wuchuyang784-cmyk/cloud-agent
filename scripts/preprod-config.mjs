@@ -206,7 +206,7 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO bairui_preprod_app;
 GRANT EXECUTE ON FUNCTION public.platform_admin_read(text,text,text,text,integer,text,text) TO bairui_preprod_app;
 GRANT EXECUTE ON FUNCTION public.platform_infrastructure_read(text) TO bairui_preprod_app;
-GRANT EXECUTE ON FUNCTION public.platform_account_access(text), public.platform_account_session_allowed(text), public.platform_governance_accounts(text,text[]), public.platform_governance_read(text,text,bigint), public.platform_governance_change(text,text,text,integer,text,uuid) TO bairui_preprod_app;
+GRANT EXECUTE ON FUNCTION public.platform_account_access(text), public.platform_scheduler_account_access(text), public.platform_account_session_allowed(text), public.platform_governance_accounts(text,text[]), public.platform_governance_read(text,text,bigint), public.platform_governance_change(text,text,text,integer,text,uuid) TO bairui_preprod_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bairui_preprod_app;
 REVOKE ALL ON TABLE public.platform_role_bindings, public.platform_admin_audit FROM bairui_preprod_app;
 REVOKE ALL ON TABLE public.platform_infrastructure_sources, public.platform_infrastructure_snapshots FROM bairui_preprod_app;

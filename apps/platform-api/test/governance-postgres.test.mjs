@@ -20,7 +20,7 @@ test('governance PostgreSQL: atomic decisions, single-connection pool and two AP
     elevated = new Pool({ connectionString, options: '-c search_path=' + schema + ',public' });
     const migrations = new URL('../../../packages/db/migrations/', import.meta.url);
     // Apply 037 after there is audit history to exercise an existing 036 installation.
-    for (const name of (await readdir(migrations)).filter(n => n.endsWith('.sql') && !n.startsWith('033') && !n.startsWith('037')).sort()) await elevated.query(await readFile(new URL(name, migrations), 'utf8'));
+    for (const name of (await readdir(migrations)).filter(n => n.endsWith('.sql') && !n.startsWith('033') && !n.startsWith('038') && !n.startsWith('037')).sort()) await elevated.query(await readFile(new URL(name, migrations), 'utf8'));
     await elevated.query(await readFile(new URL('036_account_governance.sql', migrations), 'utf8'));
     await elevated.query('GRANT USAGE ON SCHEMA ' + schema + ' TO ' + role);
     await elevated.query('GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA ' + schema + ' TO ' + role);

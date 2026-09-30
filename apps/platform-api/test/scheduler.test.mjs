@@ -71,3 +71,50 @@ test('scheduler: independent worker loop completes and shuts down', { timeout: 1
     assert.deepEqual(errors, []);
   } finally { controller.abort(); await work; }
 });
+test('scheduler: account governance cancels queued/running work and fences old workers', async () => {
+  let now = 1000;
+  const accounts = new Map([['a', { status: 'active', version: 0 }]]);
+  const s = new MemoryTaskStore({
+    clock: () => now,
+    governance: { get: userId => accounts.get(userId) ?? { status: 'active', version: 0 } },
+  });
+  const running = await s.submit(a, 'running', input);
+  const queued = await s.submit(a, 'queued', input);
+  const claim = await s.claim('old-worker');
+  const queuedId = claim.id === running.id ? queued.id : running.id;
+  assert.equal(queued.governanceVersion, 0);
+  assert.equal(claim.governanceVersion, 0);
+
+  accounts.set('a', { status: 'suspended', version: 1 });
+  assert.equal(await s.claim('replacement-worker'), null);
+  assert.equal((await s.get(a, queuedId)).status, 'cancelled');
+  assert.equal((await s.get(a, queuedId)).cancelReason, 'account_suspended');
+  assert.equal((await s.get(a, running.id)).status, 'cancelled');
+  assert.equal((await s.get(a, running.id)).cancelReason, 'account_suspended');
+  assert.ok((await s.get(a, running.id)).cancelledAt >= now);
+  assert.equal(await s.heartbeat(claim), false);
+  assert.equal(await s.finish(claim, 'succeeded'), false);
+  await assert.rejects(s.submit(a, 'blocked-suspended', input), /account_suspended/);
+
+  accounts.set('a', { status: 'banned', version: 2 });
+  await assert.rejects(s.submit(a, 'blocked-banned', input), /account_banned/);
+  now += 16000;
+  assert.equal(await s.claim('after-governance'), null);
+});
+
+test('scheduler: governance version fences a task even after account is restored', async () => {
+  let now = 1000;
+  const accounts = new Map([['a', { status: 'active', version: 0 }]]);
+  const s = new MemoryTaskStore({
+    clock: () => now,
+    governance: { get: userId => accounts.get(userId) ?? { status: 'active', version: 0 } },
+  });
+  const task = await s.submit(a, 'version-fence', input);
+  accounts.set('a', { status: 'suspended', version: 1 });
+  accounts.set('a', { status: 'active', version: 2 });
+  assert.equal(await s.claim('worker'), null);
+  const cancelled = await s.get(a, task.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.cancelReason, 'governance_changed');
+  assert.equal(cancelled.governanceVersion, 0);
+});

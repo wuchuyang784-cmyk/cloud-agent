@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { assertMonitoringResources, ensureMonitoringResources } from './monitoring.mjs';
+import { assertMonitoringResources, ensureMonitoringResources, ensureMonitoringImages } from './monitoring.mjs';
+import { validationDockerArgs } from './monitoring-rules.test.mjs';
 import { docker } from './preprod.mjs';
 import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
 
@@ -45,6 +46,31 @@ test('explicit log capture includes stderr without changing JSON command output'
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   assert.equal(await docker(['inspect']), '{"ok":true}');
   assert.match(await docker(['logs'], { includeStderr: true }), /error-stream-marker/);
+});
+
+test('existing fixed monitoring images skip registry pulls', async t => {
+  const calls = [];
+  t.mock.method(childProcess, 'execFile', (_command, args, _options, callback) => {
+    calls.push(args);
+    queueMicrotask(() => {
+      if (args[0] === 'image' && args[1] === 'inspect') return callback(null, '{}\n', '');
+      callback(null, '', '');
+    });
+    return { stdin: { on() {}, end() {} } };
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  await ensureMonitoringImages();
+  assert.equal(calls.filter(args => args[0] === 'pull').length, 0);
+  assert.equal(calls.filter(args => args[0] === 'image' && args[1] === 'inspect').length, 3);
+});
+test('rule validation gives read-only promtool a bounded non-executable temporary directory', () => {
+  const args = validationDockerArgs('E:/validation', 'E:/tokens');
+  const tmpfs = args.indexOf('--tmpfs');
+  assert.ok(tmpfs >= 0, 'promtool_tmpfs_required');
+  assert.equal(args[tmpfs + 1], '/tmp:rw,noexec,nosuid,size=64m');
+  assert.equal(args[args.indexOf('--network') + 1], 'none');
+  assert.deepEqual(args.slice(args.indexOf('--cap-drop'), args.indexOf('--security-opt')), ['--cap-drop', 'ALL']);
 });
 
 test('interrupted volume initialization retries ownership setup before marking resources ready', async t => {

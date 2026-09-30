@@ -37,7 +37,7 @@ try {
   const connectionString = `postgresql://postgres:${password}@127.0.0.1:${port}/infra_check`;
   await waitForPostgres(() => new Client({ connectionString, connectionTimeoutMillis: 2000 }));
   owner = new Pool({ connectionString });
-  for (const migration of (await readdir(join(root, 'packages/db/migrations'))).filter(n => n.endsWith('.sql') && !n.startsWith('033')).sort()) {
+  for (const migration of (await readdir(join(root, 'packages/db/migrations'))).filter(n => n.endsWith('.sql') && !n.startsWith('033') && !n.startsWith('038')).sort()) {
     await owner.query(await readFile(join(root, 'packages/db/migrations', migration), 'utf8'));
   }
   await owner.query('CREATE ROLE infra_browser_app NOLOGIN NOSUPERUSER NOBYPASSRLS');
