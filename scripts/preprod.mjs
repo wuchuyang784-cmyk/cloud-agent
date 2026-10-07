@@ -141,7 +141,7 @@ async function migrations() {
 export const revisionDirectories = ['apps/platform-api/src', 'apps/console-mvp/src', 'apps/console-mvp/public', 'apps/admin-console/src', 'infra/preprod'];
 export const revisionFiles = ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
   ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f),
-  ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)];
+  ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)];
 
 async function revision(state) {
   const hash = createHash('sha256').update(gatewayConfig(state));

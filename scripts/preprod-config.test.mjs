@@ -5,9 +5,10 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
+import { join } from 'node:path';
 import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocker, names } from './preprod-config.mjs';
 import { missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
-import { up, paths, revisionDirectories, revisionFiles } from './preprod.mjs';
+import { up, paths, root, revisionDirectories, revisionFiles } from './preprod.mjs';
 import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
 
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
@@ -72,6 +73,11 @@ test('preprod revision includes all admin console source and build inputs', () =
   }
 });
 
+test('every preprod revision input exists in the real repository layout', async () => {
+  for (const directory of revisionDirectories) await fs.access(join(root, directory));
+  for (const file of revisionFiles) await fs.access(join(root, file));
+});
+
 test('bootstrap uses file secrets and a restricted role in the independent database', () => {
   const sql = bootstrapSql([{ name: '001.sql', sql: 'SELECT 1;' }], input.schemaHash);
   assert.ok(sql.includes('NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS'));
@@ -111,7 +117,7 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
   const hash = createHash('sha256').update(gatewayConfig(state));
   for (const file of ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
     ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f),
-    ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)]) hash.update(file);
+    ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)]) hash.update(file);
   const gatewayImage = currentGatewayImage ? 'bairui/platform-web-preprod:' + hash.digest('hex').slice(0, 16) : 'previous-web-image';
   let recreated = false, monitorConnected = false;
   const missing = (kind, name) => { throw new Error('No such ' + kind + ': ' + name); };
