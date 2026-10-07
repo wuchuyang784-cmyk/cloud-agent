@@ -11,6 +11,12 @@ import { validateMonitoring } from './monitoring-rules.test.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
 
 // Monitoring shares the installation lock and never consumes the business .env.
+export function monitoringServiceReady(service, rows, expectedImage) {
+  const update = service?.UpdateStatus?.State;
+  if (update && update !== 'completed') return false;
+  return rows.length === 1 && rows[0].State.Health?.Status === 'healthy' && rows[0].Config.Image === expectedImage;
+}
+
 export async function assertMonitoringResources(state, { requirePersistent = true } = {}) {
   const found = {};
   for (const [kind, resources] of Object.entries({ service: monitorServices.map(key => monitorNames[key]), network: [monitorNames.network], volume: monitorVolumes, secret: monitorSecrets,
@@ -69,7 +75,9 @@ export async function deployMonitoring(state) {
   await waitUntil(async () => {
     for (const key of monitorServices) {
       const rows = await containers(monitorNames[key], state);
-      if (rows.length !== 1 || rows[0].State.Health?.Status !== 'healthy') return false;
+      const service = await owned('service', monitorNames[key], state);
+      const expectedImage = key === 'receiver' ? apiImage(state.revision) : monitorImages[key];
+      if (!monitoringServiceReady(service, rows, expectedImage)) return false;
     }
     return true;
   }, '四项监控服务启动', 240000);

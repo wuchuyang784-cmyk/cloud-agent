@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { assertMonitoringResources, ensureMonitoringResources, ensureMonitoringImages } from './monitoring.mjs';
+import { assertMonitoringResources, ensureMonitoringResources, ensureMonitoringImages, monitoringServiceReady } from './monitoring.mjs';
 import { validationDockerArgs } from './monitoring-rules.test.mjs';
 import { docker } from './preprod.mjs';
 import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
@@ -63,6 +63,15 @@ test('existing fixed monitoring images skip registry pulls', async t => {
   await ensureMonitoringImages();
   assert.equal(calls.filter(args => args[0] === 'pull').length, 0);
   assert.equal(calls.filter(args => args[0] === 'image' && args[1] === 'inspect').length, 3);
+});
+
+test('monitoring rollout does not accept a healthy old task while Swarm is updating', () => {
+  const image = 'grafana/grafana:13.2.2';
+  const rows = [{ Config: { Image: image }, State: { Health: { Status: 'healthy' } } }];
+  assert.equal(monitoringServiceReady({ UpdateStatus: { State: 'updating' } }, rows, image), false);
+  assert.equal(monitoringServiceReady({ UpdateStatus: { State: 'completed' } }, rows, image), true);
+  assert.equal(monitoringServiceReady({}, rows, image), true);
+  assert.equal(monitoringServiceReady({}, rows, 'grafana/grafana:other'), false);
 });
 test('rule validation gives read-only promtool a bounded non-executable temporary directory', () => {
   const args = validationDockerArgs('E:/validation', 'E:/tokens');
