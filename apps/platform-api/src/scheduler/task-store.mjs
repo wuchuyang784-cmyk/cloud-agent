@@ -67,7 +67,6 @@ class TaskStore {
         !['success', 'failure'].includes(input.outcome)) throw new TaskError('invalid_task');
     return this.mutate({ scope, key }, async (state, now, context) => {
       const account = await this.requireActive(scope, context);
-      await this.reconcileGovernance(state, now, context);
       const existing = state.tasks.find(t => owns(scope, t) && t.key === key);
       if (existing) {
         if (existing.durationMs !== input.durationMs || existing.outcome !== input.outcome) throw new TaskError('idempotency_conflict');
@@ -85,8 +84,7 @@ class TaskStore {
 
   async claim(workerId) {
     if (typeof workerId !== 'string' || !workerId || workerId.length > 128) throw new TaskError('invalid_worker');
-    return this.mutate({}, async (state, now, context) => {
-      await this.reconcileGovernance(state, now, context);
+    return this.mutate({}, async (state, now) => {
       const running = state.tasks.filter(t => t.status === 'running');
       if (running.length >= TASK_LIMITS.global || running.filter(t => t.workerId === workerId).length >= TASK_LIMITS.worker) return null;
       const eligible = state.tasks.filter(t => t.status === 'queued' && running.filter(r => r.userId === t.userId).length < TASK_LIMITS.user);
@@ -105,8 +103,7 @@ class TaskStore {
     return this.workerChange(claim, status);
   }
   async workerChange(claim, status) {
-    return this.mutate({ id: claim.id }, async (state, now, context) => {
-      await this.reconcileGovernance(state, now, context);
+    return this.mutate({ id: claim.id }, async (state, now) => {
       const t = state.tasks.find(t => t.id === claim.id);
       if (!t || t.status !== 'running' || t.workerId !== claim.workerId || t.attempt !== claim.attempt || t.leaseUntil <= now) return false;
       t.updatedAt = now;
@@ -118,7 +115,6 @@ class TaskStore {
   async cancel(scope, id) {
     return this.mutate({ scope, id }, async (state, now, context) => {
       await this.requireActive(scope, context);
-      await this.reconcileGovernance(state, now, context);
       const t = state.tasks.find(t => t.id === id && owns(scope, t));
       if (!t) return null;
       if (active(t)) Object.assign(t, { status: 'cancelled', cancelReason: 'user_requested', cancelledAt: now, workerId: null, leaseUntil: null, updatedAt: now });
@@ -143,8 +139,11 @@ export class MemoryTaskStore extends TaskStore {
   async mutate(filter, fn) {
     const run = this.mutationQueue.then(async () => {
       const state = clone(this.state), now = this.clock();
+      const context = { governanceCache: new Map() };
+      // Governance cancellation must precede lease recovery, including the final attempt.
+      await this.reconcileGovernance(state, now, context);
       recover(state, now);
-      const result = await fn(state, now, { governanceCache: new Map() });
+      const result = await fn(state, now, context);
       this.state = state;
       return result;
     });
@@ -183,9 +182,14 @@ export class PostgresTaskStore extends TaskStore {
     const c = await this.pool.connect();
     let releaseError;
     try {
-      await c.query('BEGIN');
+      // A lock wait must not leave us reading a pre-governance transaction snapshot.
+      await c.query('BEGIN ISOLATION LEVEL READ COMMITTED');
       await c.query("SET LOCAL lock_timeout='5s'");
       await c.query("SELECT pg_advisory_xact_lock(734033),set_config('app.simulation_worker','on',true)");
+      // Match the schema-qualified lock key in platform_governance_change (036/037).
+      // Read state in subsequent statements so a waited-for change is visible.
+      // Holding the shared lock through COMMIT also fences governance against stale receipts.
+      await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended(format('%I:governance:changes',current_schema()),0))");
       const context = { query: c.query.bind(c), governanceCache: new Map() };
       const now = Number((await c.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS now')).rows[0].now);
       const rows = (await c.query(
@@ -196,6 +200,7 @@ export class PostgresTaskStore extends TaskStore {
         served[JSON.stringify([row.organization_id,row.user_id])] = Number(row.served);
       }
       const state = { tasks: rows, served }, before = new Map(rows.map(t => [t.id,JSON.stringify(t)])), oldServed = {...served};
+      await this.reconcileGovernance(state,now,context);
       recover(state,now);
       const result = await fn(state,now,context);
       for (const t of state.tasks) {

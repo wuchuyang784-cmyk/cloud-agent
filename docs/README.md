@@ -32,6 +32,7 @@ pi-agent 与 deepseek-harness（dsh）作为**只读 git submodule** 挂载在�
 
 | 范围 | 文档 |
 | --- | --- |
+| D2：模拟调度治理取消、Worker 围栏与 PostgreSQL 并发验收（常驻预发已更新） | [43-phase3-governance-d2.md](43-phase3-governance-d2.md) |
 | 第三阶段 3.1：常驻本机预发、HTTPS、双 API、独立数据库与恢复验收 | [37-phase3-local-preprod.md](37-phase3-local-preprod.md) |
 | 第三阶段 3.2：监控与本地告警，真实部署验收待完成 | [38-phase3-monitoring.md](38-phase3-monitoring.md) |
 | 平台能力开关、只启动平台服务、可信代理与共享认证限流 | [36-platform-mode-and-auth-proxy.md](36-platform-mode-and-auth-proxy.md) |

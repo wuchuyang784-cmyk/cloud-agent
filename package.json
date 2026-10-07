@@ -21,7 +21,7 @@
     "preprod:up": "node scripts/preprod.mjs up",
     "preprod:status": "node scripts/preprod.mjs status",
     "preprod:stop": "node scripts/preprod.mjs stop",
-    "test:preprod:config": "node --test scripts/preprod-config.test.mjs apps/platform-api/test/service-lifecycle.test.mjs apps/platform-api/test/secret-env.test.mjs apps/platform-api/test/postgres-transactions.test.mjs",
+    "test:preprod:config": "node --test scripts/cli-module-loading.test.mjs scripts/cli-keepalive.test.mjs scripts/preprod-config.test.mjs apps/platform-api/test/service-lifecycle.test.mjs apps/platform-api/test/secret-env.test.mjs apps/platform-api/test/postgres-transactions.test.mjs",
     "test:preprod": "node scripts/test-preprod.mjs",
     "test:platform": "node scripts/test-scheduler.mjs --platform",
     "test:admin": "node scripts/test-scheduler.mjs --admin",

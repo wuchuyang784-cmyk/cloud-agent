@@ -94,12 +94,18 @@ test('ownership and local single-node checks fail closed', () => {
   assert.throws(() => assertLocalDocker({ ...info, Swarm: { ...info.Swarm, Nodes: 2 } }, 'unix:///var/run/docker.sock'));
 });
 
-function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.caddyVolume], imagePrefix, imageLabels, missingImages = false, monitoring, absent = [] } = {}) {
+function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.caddyVolume], imagePrefix, imageLabels, missingImages = false, monitoring, absent = [], currentGatewayImage = false, recreatedProxyIp = '10.0.1.3' } = {}) {
   const installation = 'a'.repeat(24), labels = { 'bairui.preprod.installation': installation };
   const endpoint = 'npipe:////./pipe/dockerDesktopLinuxEngine';
   const state = { version: 1, installation, phase, secretsReady: true, nodeId: 'local-node', endpoint,
     schemaHash: createHash('sha256').update('[]').digest('hex'), ...(monitoring ? { monitoring } : {}) };
   const existingVolumes = new Set(volumes), commands = [], mutations = [], writes = [];
+  // The fixture supplies empty directories/files to the real revision calculation.
+  const hash = createHash('sha256').update(gatewayConfig(state));
+  for (const file of ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
+    ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f)]) hash.update(file);
+  const gatewayImage = currentGatewayImage ? 'bairui/platform-web-preprod:' + hash.digest('hex').slice(0, 16) : 'previous-web-image';
+  let recreated = false;
   const missing = (kind, name) => { throw new Error('No such ' + kind + ': ' + name); };
   function respond(args) {
     commands.push(args);
@@ -116,13 +122,14 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
         if (missingImages) return missing(kind, name);
         return JSON.stringify({ Labels: labels, Config: { Labels: name.startsWith(imagePrefix ?? '!') ? imageLabels : labels } });
       }
-      if (kind === 'container') return JSON.stringify({ Config: { Labels: labels, Image: 'previous-web-image' },
-        State: { Running: phase !== 'stopped' }, NetworkSettings: { Networks: { [names.edge]: { IPAddress: '10.0.1.3' } } } });
+      if (kind === 'container') return JSON.stringify({ Config: { Labels: labels, Image: gatewayImage },
+        State: { Running: recreated || phase !== 'stopped' }, NetworkSettings: { Networks: { [names.edge]: { IPAddress: recreated ? recreatedProxyIp : '10.0.1.3' } } } });
       if (kind === 'network') return JSON.stringify({ Labels: labels, Driver: 'overlay', Attachable: true, Internal: name === names.data || name === monitorNames.network });
       return JSON.stringify({ Labels: labels, Spec: { Labels: labels } });
     }
     if (kind === 'stack' && action === 'config') return '';
     mutations.push(args);
+    if (kind === 'run') recreated = true;
     if (kind === 'stack' && action === 'deploy') throw new Error('unit_test_deployment_boundary');
     if (kind === 'volume' && action === 'create') existingVolumes.add(args.at(-1));
     return '';
@@ -174,6 +181,20 @@ test('preprod up keeps monitoring attached and pauses API before gateway replace
   const gateway = fixture.mutations.find(args => args[0] === 'run');
   assert.ok(gateway.includes('127.0.0.1:9443:9443'));
   assert.ok(!fixture.mutations.some(args => ['volume', 'secret'].includes(args[0])));
+});
+
+test('stopped same-image gateway is recreated with persistent data and a newly trusted proxy IP', async t => {
+  const fixture = recoveryFixture(t, { phase: 'stopped', currentGatewayImage: true, recreatedProxyIp: '10.0.1.9' });
+  await assert.rejects(up(), /stack deploy/);
+  const pause = fixture.mutations.findIndex(args => args[0] === 'service' && args[1] === 'scale' && args.includes(names.api + '=0'));
+  const remove = fixture.mutations.findIndex(args => args[0] === 'container' && args[1] === 'rm' && args[2] === names.gateway);
+  const run = fixture.mutations.findIndex(args => args[0] === 'run');
+  assert.ok(pause >= 0 && remove > pause && run > remove, 'stopped gateway must be recreated after API is paused');
+  assert.ok(!fixture.mutations.some(args => args[0] === 'container' && args[1] === 'start'));
+  assert.ok(!fixture.mutations.some(args => ['volume', 'secret'].includes(args[0])));
+  assert.ok(fixture.mutations[run].includes('type=volume,source=' + names.caddyVolume + ',target=/data'));
+  const stack = JSON.parse(fixture.writes.find(w => w.path === paths.stack).data);
+  assert.equal(stack.services.api.environment.BAIRUI_TRUSTED_PROXIES, '10.0.1.9/32');
 });
 
 for (const phase of ['running', 'stopped']) {

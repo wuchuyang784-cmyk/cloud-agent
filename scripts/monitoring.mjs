@@ -183,5 +183,7 @@ async function monitorPassword() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const action = { up: monitorUp, status: monitorStatus, stop: monitorStop, alerts: monitorAlerts, password: monitorPassword }[process.argv[2]];
   if (!action) { console.error('用法：node scripts/monitoring.mjs up|status|stop|alerts|password'); process.exitCode = 1; }
-  else await runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
+  // preprod.up dynamically imports monitoring again; do not hold module evaluation
+  // open while that action runs. Keep-alive still waits for completion and cleanup.
+  else runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

@@ -230,13 +230,14 @@ export async function up() {
   if (!await owned('config', configName, state)) await docker(['config', 'create', '--label', label + '=' + state.installation, configName, '-'], { input: bootstrapSql(schema.files, schema.hash) });
   if (!gateway || !gateway.State.Running || gateway.Config.Image !== webImage(rev)) {
     await pauseApi(state);
-    if (gateway && gateway.Config.Image !== webImage(rev)) {
-      await docker(['container', 'stop', '--time', '15', names.gateway]);
+    // Recreate stopped gateways: Docker may have deactivated their local overlay
+    // endpoint. Keep the certificate volume and resolve the new proxy IP below.
+    if (gateway) {
+      if (gateway.State.Running) await docker(['container', 'stop', '--time', '15', names.gateway]);
       await docker(['container', 'rm', names.gateway]);
       gateway = null;
     }
-    if (gateway) await docker(['container', 'start', names.gateway]);
-    else await docker(['run', '-d', '--name', names.gateway, '--label', label + '=' + state.installation,
+    await docker(['run', '-d', '--name', names.gateway, '--label', label + '=' + state.installation,
       '--restart', 'unless-stopped', '--network', names.edge, '--memory', '128m', '--cpus', '0.25',
       '--read-only', '--cap-drop', 'ALL', '--cap-add', 'NET_BIND_SERVICE', '--security-opt', 'no-new-privileges:true',
       '--tmpfs', '/config:rw,noexec,nosuid,size=8m', '--tmpfs', '/tmp:rw,noexec,nosuid,size=8m',
@@ -316,5 +317,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const command = process.argv[2];
   const action = { up, status, stop }[command];
   if (!action) { console.error('用法：node scripts/preprod.mjs up|status|stop'); process.exitCode = 1; }
-  else await runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
+  // Let this module finish evaluation before an action dynamically imports monitoring,
+  // whose dependency graph imports this module back. Keep-alive owns process lifetime.
+  else runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
 }
