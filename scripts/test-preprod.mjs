@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { withLock, loadState, localDocker, owned, containers, docker, request, waitReady, waitUntil, output, stop, up } from './preprod.mjs';
 import { names, origin, apiImage } from './preprod-config.mjs';
+import { monitorOrigin } from './monitoring-config.mjs';
 import { authRetryDelay } from './swarm-scheduler-config.mjs';
 
 const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomBytes(3).toString('hex');
@@ -153,6 +154,24 @@ async function verify() {
   assert.equal((await api('/api/user/resources/' + resource.id, { cookie: users[0].cookie })).body.resource.id, resource.id);
   await api('/api/user/resources/' + resource.id, { cookie: users[1].cookie, expected: 404 });
   passed('完整 stop/up 保留 Secret、证书、账号和资源，恢复后仍然保持用户隔离');
+  if (state.monitoring?.enabled) {
+    const db = (await containers(names.db, state))[0];
+    await owned('container', db.Id, state);
+    await docker(['exec', db.Id, 'psql', '-U', 'postgres', '-d', 'bairui_preprod', '--set=uid=' + users[1].scope.userId, '-v', 'ON_ERROR_STOP=1', '-c',
+      "INSERT INTO platform_role_bindings(user_id,role,granted_by,reason) VALUES (:'uid','platform_viewer','preprod-acceptance','unified monitoring acceptance') ON CONFLICT (user_id) DO UPDATE SET role='platform_viewer',revoked_at=NULL,granted_at=now(),granted_by='preprod-acceptance',reason='unified monitoring acceptance'" ]);
+    assert.equal((await api('/api/admin/me', { cookie: users[1].cookie })).body.role, 'platform_viewer');
+    const viewer = await request(monitorOrigin + '/api/user', { headers: { cookie: users[1].cookie } });
+    assert.equal(viewer.status, 200);
+    assert.equal(JSON.parse(viewer.text).login, 'bairui:' + users[1].scope.userId);
+    const orgs = await request(monitorOrigin + '/api/user/orgs', { headers: { cookie: users[1].cookie } });
+    assert.equal(JSON.parse(orgs.text)[0].role, 'Viewer');
+    assert.equal((await request(monitorOrigin + '/api/user', { headers: { 'x-bairui-monitor-user': 'bairui:forged' } })).status, 401);
+    assert.equal((await request(monitorOrigin + '/login')).status, 200);
+    await api('/api/auth/sign-out', { method: 'POST', cookie: users[1].cookie, body: {} });
+    assert.equal((await request(monitorOrigin + '/api/user', { headers: { cookie: users[1].cookie } })).status, 401);
+    assert.equal((await request(monitorOrigin + '/login')).status, 200);
+    passed('统一监控 Viewer、伪造身份拒绝、退出即时失效与独立应急登录可达');
+  }
   report.success = true;
   report.installation = state.installation;
   report.revision = state.revision;

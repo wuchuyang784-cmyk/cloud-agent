@@ -138,6 +138,11 @@ async function migrations() {
   for (const name of (await readdir(dir)).filter(n => n.endsWith('.sql')).sort()) files.push({ name, sql: await readFile(join(dir, name), 'utf8') });
   return { files, hash: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
 }
+export const revisionDirectories = ['apps/platform-api/src', 'apps/console-mvp/src', 'apps/console-mvp/public', 'apps/admin-console/src', 'infra/preprod'];
+export const revisionFiles = ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
+  ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f),
+  ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)];
+
 async function revision(state) {
   const hash = createHash('sha256').update(gatewayConfig(state));
   async function add(path) {
@@ -149,9 +154,8 @@ async function revision(state) {
       else if (entry.isFile()) hash.update(child).update(await readFile(join(root, child)));
     }
   }
-  for (const dir of ['apps/platform-api/src', 'apps/console-mvp/src', 'apps/console-mvp/public', 'infra/preprod']) await add(dir);
-  for (const file of ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
-    ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f)]) hash.update(file).update(await readFile(join(root, file)));
+  for (const dir of revisionDirectories) await add(dir);
+  for (const file of revisionFiles) hash.update(file).update(await readFile(join(root, file)));
   return hash.digest('hex').slice(0, 16);
 }
 
@@ -249,6 +253,11 @@ export async function up() {
   if (state.monitoring?.enabled && !gateway.NetworkSettings.Networks[monitorNames.network]) {
     await docker(['network', 'connect', monitorNames.network, names.gateway]);
     gateway = await owned('container', names.gateway, state);
+  }
+  if (state.monitoring?.enabled) {
+    const gatewayIp = gateway.NetworkSettings.Networks[monitorNames.network]?.IPAddress;
+    if (!gatewayIp) throw new Error('监控网关缺少精确内部地址。');
+    state.monitoring.gatewayIp = gatewayIp;
   }
   const proxyIp = gateway.NetworkSettings.Networks[names.edge]?.IPAddress;
   const stack = stackConfig({ ...state, proxyIp, revision: rev });

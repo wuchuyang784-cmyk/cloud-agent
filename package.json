@@ -16,6 +16,7 @@
     "monitor:alerts": "node scripts/monitoring.mjs alerts",
     "monitor:password": "node scripts/monitoring.mjs password",
     "test:monitoring:config": "node --test scripts/monitoring-config.test.mjs scripts/monitoring.test.mjs",
+    "test:monitoring:grafana-compat": "node scripts/monitoring-grafana-compat.test.mjs",
     "test:monitoring:rules": "node scripts/monitoring-rules.test.mjs",
     "test:monitoring": "node scripts/test-monitoring.mjs",
     "preprod:up": "node scripts/preprod.mjs up",

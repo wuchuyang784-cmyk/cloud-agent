@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
 import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocker, names } from './preprod-config.mjs';
 import { missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
-import { up, paths } from './preprod.mjs';
+import { up, paths, revisionDirectories, revisionFiles } from './preprod.mjs';
 import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
 
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
@@ -65,6 +65,13 @@ test('gateway serves HTTPS/static assets and separates API routing', () => {
   assert.ok(config.indexOf('handle_path /admin/*') < config.indexOf('root * /srv\n'));
 });
 
+test('preprod revision includes all admin console source and build inputs', () => {
+  assert.ok(revisionDirectories.includes('apps/admin-console/src'));
+  for (const name of ['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'vite.config.ts']) {
+    assert.ok(revisionFiles.includes('apps/admin-console/' + name), name);
+  }
+});
+
 test('bootstrap uses file secrets and a restricted role in the independent database', () => {
   const sql = bootstrapSql([{ name: '001.sql', sql: 'SELECT 1;' }], input.schemaHash);
   assert.ok(sql.includes('NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS'));
@@ -103,9 +110,10 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
   // The fixture supplies empty directories/files to the real revision calculation.
   const hash = createHash('sha256').update(gatewayConfig(state));
   for (const file of ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
-    ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f)]) hash.update(file);
+    ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f),
+    ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)]) hash.update(file);
   const gatewayImage = currentGatewayImage ? 'bairui/platform-web-preprod:' + hash.digest('hex').slice(0, 16) : 'previous-web-image';
-  let recreated = false;
+  let recreated = false, monitorConnected = false;
   const missing = (kind, name) => { throw new Error('No such ' + kind + ': ' + name); };
   function respond(args) {
     commands.push(args);
@@ -123,13 +131,15 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
         return JSON.stringify({ Labels: labels, Config: { Labels: name.startsWith(imagePrefix ?? '!') ? imageLabels : labels } });
       }
       if (kind === 'container') return JSON.stringify({ Config: { Labels: labels, Image: gatewayImage },
-        State: { Running: recreated || phase !== 'stopped' }, NetworkSettings: { Networks: { [names.edge]: { IPAddress: recreated ? recreatedProxyIp : '10.0.1.3' } } } });
+        State: { Running: recreated || phase !== 'stopped' }, NetworkSettings: { Networks: { [names.edge]: { IPAddress: recreated ? recreatedProxyIp : '10.0.1.3' },
+          ...(monitorConnected ? { [monitorNames.network]: { IPAddress: '10.0.3.9' } } : {}) } } });
       if (kind === 'network') return JSON.stringify({ Labels: labels, Driver: 'overlay', Attachable: true, Internal: name === names.data || name === monitorNames.network });
       return JSON.stringify({ Labels: labels, Spec: { Labels: labels } });
     }
     if (kind === 'stack' && action === 'config') return '';
     mutations.push(args);
     if (kind === 'run') recreated = true;
+    if (kind === 'network' && action === 'connect' && name === monitorNames.network) monitorConnected = true;
     if (kind === 'stack' && action === 'deploy') throw new Error('unit_test_deployment_boundary');
     if (kind === 'volume' && action === 'create') existingVolumes.add(args.at(-1));
     return '';

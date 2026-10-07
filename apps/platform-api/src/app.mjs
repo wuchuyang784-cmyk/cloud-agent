@@ -11,6 +11,7 @@ import { createTelemetry, metricsConfiguration } from './observability/metrics.m
 import { routeLabel } from './observability/labels.mjs';
 import { safeLog } from './observability/safe-log.mjs';
 import { handleAdmin } from './admin/routes.mjs';
+import { createAdminMonitoring } from './admin/monitoring.mjs';
 import { handleClientMonitoring } from './monitoring/client-routes.mjs';
 import { accountAccess, GovernanceError } from './admin/governance.mjs';
 
@@ -155,6 +156,7 @@ export function createApp(options = {}) {
   const tasks = simulationEnabled ? (options.taskStore ?? (store instanceof PostgresStore ? new PostgresTaskStore(store.pool) : new MemoryTaskStore())) : null;
   const ready = createReadiness(store, options.readinessTimeoutMs ?? 2000);
   const telemetry = createTelemetry(metricsConfig, store, { readinessTimeoutMs: options.metricsReadinessTimeoutMs });
+  const adminMonitoring = options.adminMonitoring ?? createAdminMonitoring({ baseUrl: env.BAIRUI_PROMETHEUS_URL });
   let draining = false;
 
   const server = createServer(async (request, response) => {
@@ -244,7 +246,7 @@ export function createApp(options = {}) {
 
       if (path.startsWith('/api/admin/')) {
         return await handleAdmin({ request, response, url, principal, store,
-          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId, env, readJson });
+          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId, env, readJson, monitoring: adminMonitoring });
       }
       if (!principal) return sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
 

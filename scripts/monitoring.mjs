@@ -73,8 +73,8 @@ export async function deployMonitoring(state) {
     }
     return true;
   }, '四项监控服务启动', 240000);
-  const health = await request(monitorOrigin + '/api/health');
-  if (health.status !== 200 || JSON.parse(health.text).database !== 'ok') throw new Error('Grafana HTTPS 健康检查失败。');
+  const health = await request(monitorOrigin + '/login');
+  if (health.status !== 200 || !health.text.includes('Grafana')) throw new Error('Grafana HTTPS 应急入口健康检查失败。');
   state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision();
   await saveState(state);
 }

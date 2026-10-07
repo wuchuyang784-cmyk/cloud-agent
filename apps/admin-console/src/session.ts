@@ -1,4 +1,4 @@
-export type View = 'users' | 'agents';
+export type View = 'overview' | 'users' | 'agents' | 'monitoring' | 'alerts';
 export type Query = { view: View; q?: string; after?: string; limit?: string; ownerUserId?: string; status?: string };
 export type Row = { id: string; email?: string; displayName?: string | null; createdAt?: string | null;
   authLinked?: boolean; name?: string; ownerUserId?: string; ownerEmail?: string; status?: string; engine?: string; updatedAt?: string; account?: AccountState };
@@ -8,7 +8,8 @@ export type Governance = { target: Row; account: AccountState | null; items: { i
   nextCursor: string | null; busy: boolean; error: string; success: string; retry: Command | null };
 export type Identity = { role: string; permissions: string[]; user: { id: string; email: string } };
 export type Phase = 'loading' | 'ready' | 'login' | 'denied' | 'error' | 'signing-out' | 'logout-error';
-export type Snapshot = { phase: Phase; me: Identity | null; items: Row[]; nextCursor: string | null; error: string; updatedAt: number | null; governance: Governance | null };
+export type MonitoringState = { phase: 'idle' | 'loading' | 'ready' | 'error'; data: unknown; error: string; updatedAt: number | null };
+export type Snapshot = { phase: Phase; me: Identity | null; items: Row[]; nextCursor: string | null; error: string; updatedAt: number | null; governance: Governance | null; monitoring: MonitoringState };
 type Transport = (path: string, init?: RequestInit) => Promise<Response>;
 
 class HttpError extends Error {
@@ -19,12 +20,14 @@ class HttpError extends Error {
 
 export class AdminSession {
   private transport: Transport;
-  private state: Snapshot = { phase: 'loading', me: null, items: [], nextCursor: null, error: '', updatedAt: null, governance: null };
+  private state: Snapshot = { phase: 'loading', me: null, items: [], nextCursor: null, error: '', updatedAt: null, governance: null,
+    monitoring: { phase: 'idle', data: null, error: '', updatedAt: null } };
   private detailGeneration = 0;
   private listeners = new Set<() => void>();
   private generation = 0;
   private abort = new AbortController();
   private locked = false;
+  private currentView: View = 'overview';
   private timeoutMs: number;
   constructor(transport: Transport = (path, init) => fetch(path, init), timeoutMs = 15000) { this.transport = transport; this.timeoutMs = timeoutMs; }
   getSnapshot = () => this.state;
@@ -38,7 +41,8 @@ export class AdminSession {
     this.abort = new AbortController();
     const generation = ++this.generation;
     this.detailGeneration++;
-    this.publish({ phase, me: null, items: [], nextCursor: null, error: '', updatedAt: null, governance: null });
+    this.publish({ phase, me: null, items: [], nextCursor: null, error: '', updatedAt: null, governance: null,
+      monitoring: { phase: ['overview', 'monitoring', 'alerts'].includes(this.currentView) ? 'loading' : 'idle', data: null, error: '', updatedAt: null } });
     return { generation, signal: this.abort.signal };
   }
   cancel = () => { if (!this.locked) { this.generation++; this.abort.abort(); } };
@@ -61,14 +65,30 @@ export class AdminSession {
     if (generation !== this.generation) return;
     const code = error instanceof HttpError ? error.status : 0;
     const phase = code === 401 ? 'login' : code === 403 ? 'denied' : signingIn ? 'login' : 'error';
-    this.publish({ phase, me: null, items: [], nextCursor: null, updatedAt: null, governance: null,
+    this.publish({ phase, me: null, items: [], nextCursor: null, updatedAt: null, governance: null, monitoring: { phase: 'idle', data: null, error: '', updatedAt: null },
       error: code === 429 ? '请求过于频繁，请稍后再试。' : code === 401 ? (signingIn ? '邮箱或密码错误。' : '') : code === 403 ? '当前账号没有平台管理权限。' : '请求未完成，请稍后重试。' });
   }
   private async read(query: Query, generation: number, signal: AbortSignal) {
     const me = await this.json('/api/admin/me', signal) as Identity;
     if (generation !== this.generation) return;
+    const permission = query.view === 'overview' || query.view === 'monitoring' ? 'monitoring:read' : query.view + ':read';
     if (!['platform_viewer', 'platform_operator', 'platform_admin'].includes(me.role)
-      || !me.permissions?.includes(query.view + ':read') || !me.user?.id) throw new HttpError(403);
+      || !me.permissions?.includes(permission) || !me.user?.id) throw new HttpError(403);
+    if (query.view === 'overview' || query.view === 'monitoring' || query.view === 'alerts') {
+      try {
+        const data = await this.json('/api/admin/monitoring/' + (query.view === 'alerts' ? 'alerts' : 'overview'), signal);
+        if (generation !== this.generation) return;
+        if (!data || typeof data !== 'object' || (query.view === 'alerts' && !Array.isArray(data.items))) throw new Error('invalid_monitoring');
+        this.publish({ phase: 'ready', me, items: [], nextCursor: null, error: '', updatedAt: Date.now(),
+          monitoring: { phase: 'ready', data, error: '', updatedAt: Date.now() } });
+      } catch (error) {
+        if (error instanceof HttpError && [401, 403].includes(error.status)) throw error;
+        if (generation !== this.generation) return;
+        this.publish({ phase: 'ready', me, items: [], nextCursor: null, error: '', updatedAt: Date.now(),
+          monitoring: { phase: 'error', data: null, error: '监控数据暂不可用，账号与 Agent 管理不受影响。', updatedAt: null } });
+      }
+      return;
+    }
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) if (key !== 'view' && value) params.set(key, value);
     const page = await this.json('/api/admin/' + query.view + '?' + params, signal);
@@ -78,6 +98,7 @@ export class AdminSession {
   }
   load = async (query: Query) => {
     if (this.locked) return;
+    this.currentView = query.view;
     const { generation, signal } = this.begin('loading');
     try { await this.read(query, generation, signal); }
     catch (error) { this.fail(error, generation); }
@@ -132,6 +153,7 @@ export class AdminSession {
   };
   signIn = async (email: string, password: string, query: Query = { view: 'users' }) => {
     this.locked = false;
+    this.currentView = query.view;
     const { generation, signal } = this.begin('loading');
     try {
       await this.json('/api/auth/sign-in/email', signal, { email, password });

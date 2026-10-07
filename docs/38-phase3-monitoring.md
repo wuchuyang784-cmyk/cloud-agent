@@ -60,6 +60,22 @@ npm run monitor:status
 - 两个入口复用 3.1 的本地 CA，证书文件仍为 `output/preprod/root.crt`。脚本不自动修改 Windows 信任。
 - Prometheus、Alertmanager、接收器和 API 指标均不映射宿主机端口，不通过平台路由对外开放。
 
+## 统一管理端接入（2026-10-07，代码完成，尚未更新常驻预发）
+
+管理端 `/admin/` 现采用五项结构：平台概览、用户账号、Agent 服务、运行监控、告警。概览与告警由平台 API 使用固定 PromQL 只读查询 Prometheus；浏览器不能提交查询表达式或上游地址。上游未配置、超时、响应过大或异常统一返回 `monitoring_unavailable`，且不会清空管理身份或阻断用户/Agent 页面。
+
+日常 Grafana 仍只通过回环 `https://localhost:9443` 暴露。Caddy 对每个非应急请求调用 `GET /api/admin/monitoring/access` 复核 Better Auth 会话、active 账号状态和显式平台角色，删除客户端身份头后才注入 `X-Bairui-Monitor-User` 与固定 `Viewer` 角色头。Grafana Auth Proxy 只信任网关在监控私网的精确 IP，并在每次请求同步角色；即使技术用户曾被改为 Editor，下一次平台请求也会恢复为 Viewer。日常链路不向 Grafana传递 Cookie/Authorization，也不把 Grafana 会话 Cookie 返回给平台用户。
+
+`/login`、登录页所需的 `/public/*` 白名单静态资源与已有 `grafana_session` 继续走 Grafana 独立应急会话，平台 API 或数据库不可用时仍可登录；伪造会话由 Grafana 自身拒绝。固定 Grafana/Caddy 镜像的隔离兼容性入口为：
+
+```powershell
+npm run test:monitoring:grafana-compat
+```
+
+该命令只创建随机命名的临时容器和网络，验证 Viewer 映射和逐请求角色回收、伪造头拒绝、伪造会话拒绝、平台鉴权停机后登录静态资源与真实管理员登录，以及生产 Caddyfile 解析，最后清理资源。本节描述当前工作区代码；未经单独部署验证，不代表常驻预发已切换到统一入口。
+
+概览的新鲜度来自固定 `timestamp(...)` 查询取得的底层样本时间，不使用 Prometheus instant query 的评估时间。所有 Prometheus 请求的排队与执行共用 3 秒绝对截止时间，队列和并发数均有上限；饱和时快速返回统一 503，断开的页面不会留下长期无界查询。
+
 ## Grafana 密码
 
 首次由加密随机数生成并写入独立 Docker Secret，配置文件和终端不显示密码。只有显式执行以下命令，才复制到 Windows 剪贴板：

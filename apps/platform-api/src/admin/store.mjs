@@ -2,7 +2,7 @@ import { rollbackForRelease } from '../postgres-transaction.mjs';
 import { accountAccess } from './governance.mjs';
 
 const roles = new Set(['platform_viewer', 'platform_operator', 'platform_admin']);
-const permissions = ['users:read', 'agents:read'];
+const permissions = ['users:read', 'agents:read', 'monitoring:read', 'alerts:read'];
 const safeUser = user => ({ id: user.id, email: user.email, displayName: user.displayName ?? null,
   createdAt: user.createdAt ?? null, authLinked: Boolean(user.authSubject?.startsWith('better-auth:')) });
 

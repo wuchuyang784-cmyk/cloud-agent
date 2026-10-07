@@ -150,3 +150,30 @@ test('admin UI: sign-in uses existing Better Auth only, no role/header/local cre
   assert.equal(calls[0].options.credentials, 'same-origin');
   assert.equal(calls[0].options.headers['x-platform-role'], undefined);
 });
+
+test('unified console: monitoring failures preserve identity and list navigation remains available', async () => {
+  const identity = { ...me, permissions: [...me.permissions, 'monitoring:read', 'alerts:read'] };
+  const model = new AdminSession(async path => response(path === '/api/admin/me' ? identity
+    : path === '/api/admin/monitoring/overview' ? { error: { code: 'monitoring_unavailable' } }
+    : { items: [{ id: 'user-a' }], nextCursor: null }, path === '/api/admin/monitoring/overview' ? 503 : 200));
+  await model.load({ view: 'overview' });
+  assert.equal(model.getSnapshot().phase, 'ready');
+  assert.equal(model.getSnapshot().me.user.id, 'admin');
+  assert.equal(model.getSnapshot().monitoring.phase, 'error');
+  await model.load({ view: 'users' });
+  assert.equal(model.getSnapshot().items[0].id, 'user-a');
+});
+
+test('unified console: leaving monitoring ignores a late response', async () => {
+  const pending = deferred();
+  const identity = { ...me, permissions: [...me.permissions, 'monitoring:read', 'alerts:read'] };
+  const model = new AdminSession(async path => path === '/api/admin/me' ? response(identity)
+    : path === '/api/admin/monitoring/alerts' ? pending.promise : response({ items: [{ id: 'agent-a' }], nextCursor: null }));
+  const old = model.load({ view: 'alerts' });
+  await new Promise(resolve => setImmediate(resolve));
+  await model.load({ view: 'agents' });
+  pending.resolve(response({ items: [{ name: 'late', severity: 'critical', state: 'firing', activeAt: null, instance: null }] }));
+  await old;
+  assert.equal(model.getSnapshot().items[0].id, 'agent-a');
+  assert.equal(model.getSnapshot().monitoring.phase, 'idle');
+});

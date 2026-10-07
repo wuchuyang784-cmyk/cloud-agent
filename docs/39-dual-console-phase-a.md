@@ -146,6 +146,12 @@ npm run test:monitoring:config
 
 ## 6. 安全与运行边界
 
+### 统一控制台扩展（2026-10-07）
+
+管理端保留原显式平台角色与账号治理边界，并扩展为平台概览、用户账号、Agent 服务、运行监控、告警五项导航。`platform_viewer`、`platform_operator`、`platform_admin` 均获得 `monitoring:read` 与 `alerts:read`；只有 active 的 `platform_admin` 仍具有 `users:govern`。客户端控制台不增加任何跨用户管理或 Grafana入口。
+
+新增只读端点为 `/api/admin/monitoring/overview`、`/api/admin/monitoring/alerts` 和仅供 Caddy 鉴权子请求使用的 `/api/admin/monitoring/access`。所有端点每次复核 Principal、账号状态和平台角色；监控数据状态与账号列表状态隔离，监控 503 不降级成管理端整体失败。详细部署和应急登录边界见 `docs/38-phase3-monitoring.md`。
+
 - 三个管理 GET 路由：`/api/admin/me`、`/api/admin/users`、`/api/admin/agents`；所有响应 `no-store`，已知路径的写方法为 405。
 - actor 只来自服务端 Principal；`role`、`organizationId`、未知参数、重复参数被拒绝。查询每页最多 100 行，按 ID 游标推进，不执行全表总数查询。查询事务有 3 秒语句超时；超时或数据库异常只返回 `admin_unavailable`。
 - 数据库只读函数每次复核角色，返回固定字段，不暴露密码哈希、认证 subject、Cookie、Provider Key、配置、内部 Runtime URL 或对话内容。函数固定 schema 引用和 search_path，PUBLIC 无执行权。

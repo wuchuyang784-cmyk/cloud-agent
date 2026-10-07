@@ -56,7 +56,8 @@ export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHas
           BAIRUI_SECRET_FILE: '/run/secrets/platform-env', BETTER_AUTH_URL: origin,
           BAIRUI_TRUSTED_PROXIES: proxyIp + '/32', BAIRUI_SIMULATION_ENABLED: '0',
           BAIRUI_DB_POOL_MAX: '10', BAIRUI_DB_CONNECT_TIMEOUT_MS: '2000', BAIRUI_DB_QUERY_TIMEOUT_MS: '5000',
-          ...(monitoring?.enabled ? { BAIRUI_METRICS_ENABLED: '1', BAIRUI_METRICS_PORT: '9464', BAIRUI_METRICS_TOKEN_FILE: '/run/secrets/metrics-token' } : {}),
+          ...(monitoring?.enabled ? { BAIRUI_METRICS_ENABLED: '1', BAIRUI_METRICS_PORT: '9464', BAIRUI_METRICS_TOKEN_FILE: '/run/secrets/metrics-token',
+            BAIRUI_PROMETHEUS_URL: 'http://' + monitorNames.prometheus + ':9090' } : {}),
         },
         secrets: [{ source: 'platform_env', target: 'platform-env', uid: '1000', gid: '1000', mode: 256 },
           ...(monitoring?.enabled ? [{ source: 'metrics_token', target: 'metrics-token', uid: '1000', gid: '1000', mode: 256 }] : [])],
@@ -179,10 +180,47 @@ ${monitoring?.enabled ? `https://localhost:9443 {
   header {
     X-Content-Type-Options nosniff
     Referrer-Policy same-origin
+    Content-Security-Policy "frame-ancestors https://localhost:8443"
     -Server
   }
-  handle {
+  request_header -X-Bairui-Monitor-User
+  request_header -X-Bairui-Monitor-Role
+  @emergencyLogin path /login /login/* /logout
+  handle @emergencyLogin {
     reverse_proxy ${monitorNames.grafana}:3000 {
+      header_up -X-Bairui-Monitor-User
+    }
+  }
+  @emergencyPublic path /public/* /robots.txt /favicon.ico
+  handle @emergencyPublic {
+    reverse_proxy ${monitorNames.grafana}:3000 {
+      header_up -X-Bairui-Monitor-User
+      header_up -X-Bairui-Monitor-Role
+      header_up -Cookie
+      header_up -Authorization
+      header_down -Set-Cookie
+    }
+  }
+  @emergencySession header_regexp grafanaSession Cookie "(?i)(^|;\\s*)grafana_session="
+  handle @emergencySession {
+    reverse_proxy ${monitorNames.grafana}:3000 {
+      header_up -X-Bairui-Monitor-User
+    }
+  }
+  handle {
+    forward_auth {
+      uri /api/admin/monitoring/access
+      copy_headers X-Bairui-Monitor-User X-Bairui-Monitor-Role
+      dynamic a {
+        name tasks.${names.api}
+        port 8080
+        refresh 2s
+      }
+    }
+    reverse_proxy ${monitorNames.grafana}:3000 {
+      header_up -Cookie
+      header_up -Authorization
+      header_down -Set-Cookie
       transport http {
         dial_timeout 2s
         response_header_timeout 20s

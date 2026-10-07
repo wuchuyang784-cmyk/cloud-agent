@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
 
 export const monitorOrigin = 'https://localhost:9443';
 export const monitorNames = Object.freeze({
@@ -87,8 +88,9 @@ export function monitoringAssets() {
 export const monitoringRevision = () => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(), images: monitorImages })).digest('hex').slice(0, 16);
 export const monitorConfigName = name => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision();
 
-export function monitoringStack({ installation, nodeId, revision }) {
+export function monitoringStack({ installation, nodeId, revision, monitoring }) {
   assert.match(installation, /^[a-f0-9]{24}$/); assert.match(nodeId, /^[a-z0-9-]+$/); assert.match(revision, /^[a-f0-9]{16}$/);
+  assert.ok(isIP(monitoring?.gatewayIp) === 4 && !/^(0|127|169|224|255)\./.test(monitoring.gatewayIp), 'exact_monitor_gateway_ip_required');
   const labels = { 'bairui.preprod.installation': installation };
   const service = (image, user, memory, cpu) => ({ image, user, read_only: true, cap_drop: ['ALL'], labels,
     networks: ['monitor'], logging: { driver: 'json-file', options: { 'max-size': '5m', 'max-file': '3' } },
@@ -115,6 +117,11 @@ export function monitoringStack({ installation, nodeId, revision }) {
       grafana: { ...service(monitorImages.grafana, '472:472', '384M', '0.50'),
         environment: { GF_SERVER_ROOT_URL: monitorOrigin, GF_SECURITY_ADMIN_USER: 'admin', GF_SECURITY_ADMIN_PASSWORD__FILE: '/run/secrets/grafana-password',
           GF_SECURITY_COOKIE_SECURE: 'true', GF_SECURITY_COOKIE_SAMESITE: 'strict', GF_AUTH_ANONYMOUS_ENABLED: 'false', GF_USERS_ALLOW_SIGN_UP: 'false',
+          GF_AUTH_PROXY_ENABLED: 'true', GF_AUTH_PROXY_HEADER_NAME: 'X-Bairui-Monitor-User', GF_AUTH_PROXY_HEADER_PROPERTY: 'username',
+          GF_AUTH_PROXY_AUTO_SIGN_UP: 'true', GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN: 'false', GF_USERS_AUTO_ASSIGN_ORG_ROLE: 'Viewer',
+          GF_AUTH_PROXY_HEADERS: 'Role:X-Bairui-Monitor-Role', GF_AUTH_PROXY_SYNC_TTL: '0',
+          GF_AUTH_PROXY_WHITELIST: monitoring.gatewayIp,
+          GF_SECURITY_ALLOW_EMBEDDING: 'true',
           GF_ANALYTICS_REPORTING_ENABLED: 'false', GF_ANALYTICS_CHECK_FOR_UPDATES: 'false', GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false',
           GF_PLUGINS_PREINSTALL_DISABLED: 'true', GF_PLUGINS_PLUGIN_ADMIN_ENABLED: 'false', GF_SNAPSHOTS_EXTERNAL_ENABLED: 'false',
           GF_NEWS_NEWS_FEED_ENABLED: 'false', GF_UNIFIED_ALERTING_ENABLED: 'false', GF_LOG_MODE: 'console', GF_LOG_LEVEL: 'warn', GF_METRICS_ENABLED: 'true',
