@@ -90,7 +90,9 @@ test('Caddy isolates Grafana and does not expose any metrics or collection endpo
   assert.ok(!original.includes(':9443'));
   const enabled = gatewayConfig({ monitoring: { enabled: true } });
   assert.ok(enabled.includes('https://localhost:9443'));
-  assert.ok(enabled.includes('bairui-monitor_grafana:3000'));
+  assert.ok(enabled.includes('name tasks.' + monitorNames.grafana));
+  assert.ok(enabled.includes('port 3000'));
+  assert.ok(!enabled.includes('reverse_proxy ' + monitorNames.grafana + ':3000'));
   assert.ok(enabled.includes('forward_auth'));
   assert.ok(enabled.includes('/api/admin/monitoring/access'));
   assert.ok(enabled.includes('request_header -X-Bairui-Monitor-Role'));

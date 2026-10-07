@@ -187,13 +187,23 @@ ${monitoring?.enabled ? `https://localhost:9443 {
   request_header -X-Bairui-Monitor-Role
   @emergencyLogin path /login /login/* /logout
   handle @emergencyLogin {
-    reverse_proxy ${monitorNames.grafana}:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
       header_up -X-Bairui-Monitor-User
     }
   }
   @emergencyPublic path /public/* /robots.txt /favicon.ico
   handle @emergencyPublic {
-    reverse_proxy ${monitorNames.grafana}:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
       header_up -X-Bairui-Monitor-User
       header_up -X-Bairui-Monitor-Role
       header_up -Cookie
@@ -203,7 +213,12 @@ ${monitoring?.enabled ? `https://localhost:9443 {
   }
   @emergencySession header_regexp grafanaSession Cookie "(?i)(^|;\\s*)grafana_session="
   handle @emergencySession {
-    reverse_proxy ${monitorNames.grafana}:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
       header_up -X-Bairui-Monitor-User
     }
   }
@@ -217,7 +232,12 @@ ${monitoring?.enabled ? `https://localhost:9443 {
         refresh 2s
       }
     }
-    reverse_proxy ${monitorNames.grafana}:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
       header_up -Cookie
       header_up -Authorization
       header_down -Set-Cookie

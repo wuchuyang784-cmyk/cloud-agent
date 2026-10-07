@@ -49,13 +49,23 @@ try {
   request_header -X-Bairui-Monitor-Role
   @emergencyLogin path /login /login/* /logout
   handle @emergencyLogin {
-    reverse_proxy grafana:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.bairui-monitor_grafana
+        port 3000
+        refresh 2s
+      }
       header_up -X-Bairui-Monitor-User
     }
   }
   @emergencyPublic path /public/* /robots.txt /favicon.ico
   handle @emergencyPublic {
-    reverse_proxy grafana:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.bairui-monitor_grafana
+        port 3000
+        refresh 2s
+      }
       header_up -X-Bairui-Monitor-User
       header_up -X-Bairui-Monitor-Role
       header_up -Cookie
@@ -65,7 +75,12 @@ try {
   }
   @emergencySession header_regexp grafanaSession Cookie "(?i)(^|;\\s*)grafana_session="
   handle @emergencySession {
-    reverse_proxy grafana:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.bairui-monitor_grafana
+        port 3000
+        refresh 2s
+      }
       header_up -X-Bairui-Monitor-User
     }
   }
@@ -74,7 +89,12 @@ try {
       uri /api/admin/monitoring/access
       copy_headers X-Bairui-Monitor-User X-Bairui-Monitor-Role
     }
-    reverse_proxy grafana:3000 {
+    reverse_proxy {
+      dynamic a {
+        name tasks.bairui-monitor_grafana
+        port 3000
+        refresh 2s
+      }
       header_up -Cookie
       header_up -Authorization
       header_down -Set-Cookie
@@ -91,7 +111,7 @@ try {
   await new Promise(resolve => setTimeout(resolve, 500));
   if (await docker(['inspect', '-f', '{{.State.Running}}', names.caddy]) !== 'true') throw new Error('caddy_start_failed');
   const caddyIp = await docker(['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', names.caddy]);
-  await docker(['run', '-d', '--name', names.grafana, '--network', names.network, '--network-alias', 'grafana', '--read-only', '--cap-drop', 'ALL', '--tmpfs', '/var/lib/grafana', '--tmpfs', '/tmp',
+  await docker(['run', '-d', '--name', names.grafana, '--network', names.network, '--network-alias', 'grafana', '--network-alias', 'tasks.bairui-monitor_grafana', '--read-only', '--cap-drop', 'ALL', '--tmpfs', '/var/lib/grafana', '--tmpfs', '/tmp',
     '-e', 'GF_SERVER_ROOT_URL=http://localhost:' + port, '-e', 'GF_SECURITY_ADMIN_USER=admin', '-e', 'GF_SECURITY_ADMIN_PASSWORD=compat-admin-secret',
     '-e', 'GF_AUTH_ANONYMOUS_ENABLED=false', '-e', 'GF_USERS_ALLOW_SIGN_UP=false', '-e', 'GF_AUTH_PROXY_ENABLED=true',
     '-e', 'GF_AUTH_PROXY_HEADER_NAME=X-Bairui-Monitor-User', '-e', 'GF_AUTH_PROXY_HEADER_PROPERTY=username', '-e', 'GF_AUTH_PROXY_AUTO_SIGN_UP=true',
