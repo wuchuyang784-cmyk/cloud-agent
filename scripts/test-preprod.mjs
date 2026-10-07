@@ -7,6 +7,7 @@ import { withLock, loadState, localDocker, owned, containers, docker, request, w
 import { names, origin, apiImage } from './preprod-config.mjs';
 import { monitorOrigin } from './monitoring-config.mjs';
 import { authRetryDelay } from './swarm-scheduler-config.mjs';
+import { viewerGrantCommand } from './preprod-acceptance.mjs';
 
 const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomBytes(3).toString('hex');
 const report = { runId, success: false, startedAt: new Date().toISOString(), checks: [] };
@@ -157,8 +158,8 @@ async function verify() {
   if (state.monitoring?.enabled) {
     const db = (await containers(names.db, state))[0];
     await owned('container', db.Id, state);
-    await docker(['exec', db.Id, 'psql', '-U', 'postgres', '-d', 'bairui_preprod', '--set=uid=' + users[1].scope.userId, '-v', 'ON_ERROR_STOP=1', '-c',
-      "INSERT INTO platform_role_bindings(user_id,role,granted_by,reason) VALUES (:'uid','platform_viewer','preprod-acceptance','unified monitoring acceptance') ON CONFLICT (user_id) DO UPDATE SET role='platform_viewer',revoked_at=NULL,granted_at=now(),granted_by='preprod-acceptance',reason='unified monitoring acceptance'" ]);
+    const grant = viewerGrantCommand(db.Id, users[1].scope.userId);
+    await docker(grant.args, { input: grant.input });
     assert.equal((await api('/api/admin/me', { cookie: users[1].cookie })).body.role, 'platform_viewer');
     const viewer = await request(monitorOrigin + '/api/user', { headers: { cookie: users[1].cookie } });
     assert.equal(viewer.status, 200);

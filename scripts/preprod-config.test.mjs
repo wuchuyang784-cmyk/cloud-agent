@@ -10,6 +10,7 @@ import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocke
 import { missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
 import { up, paths, root, revisionDirectories, revisionFiles } from './preprod.mjs';
 import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
+import { viewerGrantCommand } from './preprod-acceptance.mjs';
 
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
 
@@ -76,6 +77,14 @@ test('preprod revision includes all admin console source and build inputs', () =
 test('every preprod revision input exists in the real repository layout', async () => {
   for (const directory of revisionDirectories) await fs.access(join(root, directory));
   for (const file of revisionFiles) await fs.access(join(root, file));
+});
+
+test('preprod Viewer grant sends psql variables through stdin instead of -c', () => {
+  const command = viewerGrantCommand('a'.repeat(64), 'user-123');
+  assert.deepEqual(command.args.slice(0, 3), ['exec', '-i', 'a'.repeat(64)]);
+  assert.ok(!command.args.includes('-c'));
+  assert.ok(command.args.includes('--set=uid=user-123'));
+  assert.match(command.input, /VALUES \(:'uid'/);
 });
 
 test('bootstrap uses file secrets and a restricted role in the independent database', () => {
