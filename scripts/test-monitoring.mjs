@@ -8,6 +8,7 @@ import { monitorNames, monitorServices, monitorSecrets, monitorImages, monitorOr
 import { assertMonitoringResources, alertRecords, grafanaPassword } from './monitoring.mjs';
 import { validateMonitoring } from './monitoring-rules.test.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
+import { grafanaAdminLogin, grafanaSessionCookie } from './preprod-acceptance.mjs';
 
 const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomBytes(3).toString('hex');
 const report = { runId, success: false, startedAt: new Date().toISOString(), checks: [] };
@@ -53,7 +54,9 @@ async function verify() {
   const unauth = await request(monitorOrigin + '/api/datasources');
   assert.ok([401, 403].includes(unauth.status));
   const password = await grafanaPassword(state);
-  const headers = { authorization: 'Basic ' + Buffer.from('admin:' + password).toString('base64'), origin: monitorOrigin };
+  const login = await request(monitorOrigin + '/login', grafanaAdminLogin(password));
+  assert.equal(login.status, 200);
+  const headers = { cookie: grafanaSessionCookie(login.headers), origin: monitorOrigin };
   const dashboard = await request(monitorOrigin + '/api/dashboards/uid/bairui-platform', { headers });
   assert.equal(dashboard.status, 200);
   assert.ok(JSON.parse(dashboard.text).dashboard.panels.length >= 8);

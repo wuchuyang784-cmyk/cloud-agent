@@ -8,3 +8,18 @@ export function viewerGrantCommand(containerId, userId) {
     input: "INSERT INTO platform_role_bindings(user_id,role,granted_by,reason) VALUES (:'uid','platform_viewer','preprod-acceptance','unified monitoring acceptance') ON CONFLICT (user_id) DO UPDATE SET role='platform_viewer',revoked_at=NULL,granted_at=now(),granted_by='preprod-acceptance',reason='unified monitoring acceptance';\n",
   };
 }
+
+export function grafanaAdminLogin(password) {
+  assert.equal(typeof password, 'string');
+  assert.ok(password.length >= 16 && password.length <= 256 && !/[\r\n\0]/.test(password));
+  return { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user: 'admin', password }) };
+}
+
+export function grafanaSessionCookie(headers) {
+  const values = Array.isArray(headers?.['set-cookie']) ? headers['set-cookie'] : headers?.['set-cookie'] ? [headers['set-cookie']] : [];
+  for (const value of values) {
+    const match = String(value).match(/(?:^|;\s*)(grafana_session=[^;,\s]+)/);
+    if (match) return match[1];
+  }
+  throw new Error('grafana_admin_session_missing');
+}

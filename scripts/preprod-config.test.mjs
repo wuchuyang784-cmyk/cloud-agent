@@ -10,7 +10,7 @@ import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocke
 import { missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
 import { up, paths, root, revisionDirectories, revisionFiles } from './preprod.mjs';
 import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
-import { viewerGrantCommand } from './preprod-acceptance.mjs';
+import { viewerGrantCommand, grafanaAdminLogin, grafanaSessionCookie } from './preprod-acceptance.mjs';
 
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
 
@@ -85,6 +85,15 @@ test('preprod Viewer grant sends psql variables through stdin instead of -c', ()
   assert.ok(!command.args.includes('-c'));
   assert.ok(command.args.includes('--set=uid=user-123'));
   assert.match(command.input, /VALUES \(:'uid'/);
+});
+
+test('monitoring acceptance uses the Grafana emergency session instead of Basic auth', () => {
+  const login = grafanaAdminLogin('a'.repeat(32));
+  assert.equal(login.method, 'POST');
+  assert.equal(login.headers['content-type'], 'application/json');
+  assert.deepEqual(JSON.parse(login.body), { user: 'admin', password: 'a'.repeat(32) });
+  assert.equal(grafanaSessionCookie({ 'set-cookie': ['grafana_session=session-token; Path=/; Secure; HttpOnly'] }), 'grafana_session=session-token');
+  assert.throws(() => grafanaSessionCookie({}), /grafana_admin_session_missing/);
 });
 
 test('bootstrap uses file secrets and a restricted role in the independent database', () => {
