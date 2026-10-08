@@ -18,3 +18,18 @@ export function createRuntimeDriver(options = {}) {
 export { RuntimeDriver, RuntimeDriverError, idOfSpec } from './runtime-driver.mjs';
 export { LocalProcessDriver } from './local-driver.mjs';
 export { RemoteRuntimeDriver } from './remote-driver.mjs';
+export {
+  buildStartRequest,
+  buildStopRequest,
+  parseInspection,
+  parseStartConfirmation,
+  parseStopConfirmation,
+} from '../control-contract.mjs';
+export {
+  ControlEnvelopeError,
+  MemoryNonceStore,
+  signControlRequest,
+  signControlResponse,
+  verifyControlRequest,
+  verifyControlResponse,
+} from '../control-envelope.mjs';
