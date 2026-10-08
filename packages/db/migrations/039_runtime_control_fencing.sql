@@ -375,7 +375,8 @@ BEGIN
           INSERT INTO %1$I.control_outbox(organization_id,aggregate_type,aggregate_id,event_type,payload,request_id)
             VALUES(item.organization_id,'runtime',item.agent_id,'runtime.stop.requested',jsonb_build_object(
               'agentId',item.agent_id,'runId',r.id,'runGeneration',r.run_generation,'fenceGeneration',v_generation,
-              'reason','account_'||item.account_status),v_request) ON CONFLICT(request_id) DO NOTHING;
+              'reason','account_'||item.account_status),v_request)
+            ON CONFLICT(request_id) WHERE request_id IS NOT NULL DO NOTHING;
         END IF;
         INSERT INTO %1$I.agent_runtime_control_requests(request_id,organization_id,agent_id,action,request_hash,
           expected_generation,result_generation,result_code,run_id,actor_user_id,reason)
