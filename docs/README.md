@@ -32,6 +32,7 @@ pi-agent 与 deepseek-harness（dsh）作为**只读 git submodule** 挂载在�
 
 | 范围 | 文档 |
 | --- | --- |
+| 统一管理与监控控制台：常驻预发更新、备份及完整验收记录 | [44-unified-admin-monitoring-rollout.md](44-unified-admin-monitoring-rollout.md) |
 | D2：模拟调度治理取消、Worker 围栏与 PostgreSQL 并发验收（常驻预发已更新） | [43-phase3-governance-d2.md](43-phase3-governance-d2.md) |
 | 第三阶段 3.1：常驻本机预发、HTTPS、双 API、独立数据库与恢复验收 | [37-phase3-local-preprod.md](37-phase3-local-preprod.md) |
 | 第三阶段 3.2：监控、本地告警与统一管理端接入 | [38-phase3-monitoring.md](38-phase3-monitoring.md) |

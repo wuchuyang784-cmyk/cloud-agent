@@ -21,13 +21,15 @@
 
 ## 项目定位
 
-### 统一管理与监控控制台（2026-10-07，工作区开发完成，尚未部署）
+### 统一管理与监控控制台（2026-10-08，常驻预发已更新）
 
 - 管理端采用五项导航：平台概览、用户账号、Agent 服务、运行监控、告警；客户端不增加跨用户管理或 Grafana入口。
 - 平台 API 只允许固定 PromQL 查询，浏览器不能传入查询表达式或上游地址；监控 503 与用户/Agent 管理状态隔离。
 - 9443 Caddy 对日常 Grafana 请求逐次复核 Better Auth、active 账号和平台角色，再注入 Viewer 技术身份；Grafana Auth Proxy 只信任网关监控网络精确 IP。
 - Grafana 独立管理员登录保留为应急通道，不在 UI 暴露密码。隔离 Docker 兼容性测试验证 Viewer、伪造头/会话拒绝与平台鉴权不可用时应急登录仍可达。
-- 本轮仅完成代码和本机隔离验证，未提交、未推送、未更新常驻预发；部署后还需真实账号浏览器与退出/撤权验证。设计与运行边界见 `docs/38-phase3-monitoring.md`。
+- 2026-10-08 已提交并推送，常驻预发更新为镜像版本 `0af022020540c78c`（源码提交 `26e0717`）。更新前备份位于已忽略的 `output/preprod/backups/unified-console-2026-10-07T16-08-58-814Z/`；数据库 dump 已校验可列出，原数据库卷、证书卷和 Secret 身份保持不变。
+- 最新 `test:preprod` 与 `test:monitoring` 完整通过，报告分别为 `acceptance-2026-10-08T04-53-01-494Z-c65638.json` 和 `monitoring-acceptance-2026-10-08T11-04-11-960Z-86a257.json`。浏览器验证覆盖管理员/观察员、五项导航、Grafana Viewer、暂停拒绝、解除恢复、封禁撤销旧会话，以及 1440/390/320px 布局；测试会话已退出，临时凭据已删除。
+- 部署期间修复了预发输入清单、监控滚动收敛等待、psql stdin、Grafana Auth Proxy 源 IP、Grafana 验收登录方式和 320px 指标卡片溢出。业务库 `bairui` 与容器 `bairui-postgres` 未操作；真实 Agent、模拟 Worker 和用户侧执行仍关闭。详细记录见 `docs/44-unified-admin-monitoring-rollout.md`。
 
 ### 双端平台 D2：模拟调度治理闭环（2026-10-06 并发补强；2026-10-07 常驻预发已更新）
 
@@ -87,14 +89,14 @@
 - 独立验证入口 `npm run test:admin`、`npm run test:admin:web`、`npm run build:admin`。业务库已用真实受限应用连接验证管理员读取、其他 4 个账号拒绝、管理表直读拒绝；真实账号浏览器验收仍需用户重启开发服务后使用原密码完成。常驻预发未修改，不代表监控部署、真实 Agent 或平台治理已完成。
 - 后续顺序：B 本人 Agent 监控，C 管理端基础设施观测，D 治理执行闭环，E 真实 Runtime。D 批规则：暂停账号服务允许只读登录；封禁账号禁止登录并撤销会话、阻止 Agent 服务；解除不自动启动 Agent。
 
-### 第三阶段 3.2 监控与本地告警（2026-09-19，代码已验证，未部署验收）
+### 第三阶段 3.2 监控与本地告警（2026-10-08，常驻预发已验收）
 
 - 入口为 `npm run monitor:up/status/stop/alerts/password`，说明见 `docs/38-phase3-monitoring.md`。源码命令使用各自独立 npm script，不把冒号后的斜线组合当作命令执行。
 - 使用 Prometheus、Grafana、Alertmanager 和白名单告警接收器；监控网络独立且内部隔离，Grafana 只经 Caddy 的回环 `9443` 访问，不塞入客户端 UI。
 - API 指标默认为关闭；预发启用后使用专用端口和独立 Secret，按 tasks DNS 分别采集两份 API。指标和错误日志不得记录身份、正文、Cookie、原始 URL/SQL。
 - 新监控资源归属、卷、Secret 和开关记入现有预发状态。禁止缺失后自动生成替代数据；普通预发启停保留并恢复已接入监控，停止不删卷。
-- 本机组合测试 79 项通过，后端与前端回归、独立 PostgreSQL 平台/调度专项通过；Caddy 实际配置解析通过。初始化中断可重试已确认归属的卷根目录权限，不替换 Secret，不修改已完成安装的卷权限。
-- Docker Hub 拉取先前返回 EOF，最近重试为官方 registry 连接超时。官方 promtool/amtool、实际部署、故障告警和浏览器验收尚未完成；需用户确认可用代理或批准镜像来源。不得把代码或单元测试通过写成平台运维已验收。
+- 固定 Prometheus/Grafana/Alertmanager 镜像已部署；官方 promtool/amtool、真实 API `2 -> 1 -> 2` 告警与恢复、本地接收器持久化、四组件重建、指标历史和 Secret 保留均已验收。
+- 统一管理端中的固定 PromQL 概览、当前告警和 Grafana Viewer 已完成真实浏览器验证。Grafana Prometheus 插件缺少 `zh-Hans` 资源时会在控制台产生 404 并回退，不影响看板加载；不要把该非阻塞上游本地化回退误判为平台鉴权失败。
 - `test:monitoring` 会暂降仅预发 API 副本并重建监控服务，不对正在使用的预发执行。通知只在本机，不能覆盖整机停机或替代外部告警。
 
 ### 第三阶段 3.1 常驻预发（2026-09-18）

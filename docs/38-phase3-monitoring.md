@@ -4,22 +4,19 @@
 
 本批面向平台运维，使用开源 Prometheus、Grafana、Alertmanager，不往客户端控制台加入管理页面。只接入独立 `bairui_preprod`，不读取业务 `.env`，不访问或迁移 `bairui`，不开放 Agent 创建、执行或模拟充值。
 
-**截至 2026-09-19，代码及本机测试已验证，尚未完成真实部署验收。** 本机 Docker Hub 下载监控镜像先前返回 `EOF`，最近重试为 `registry-1.docker.io:443` 连接超时。因此尚未启用监控、未执行故障演练，也没有监控资源占用实测结论。不能把本说明中的操作流程当作已经通过的验收记录。后续以 `output/preprod/monitoring-acceptance-*.json` 的 `success` 字段为准，另需浏览器检查。
+**截至 2026-10-08，固定镜像已部署到独立常驻预发并完成真实故障与浏览器验收。** 当前安装身份为 `d30efbca7e8effb303785af8`，镜像版本为 `0af022020540c78c`。最新完整监控报告是 `output/preprod/monitoring-acceptance-2026-10-08T11-04-11-960Z-86a257.json`，`success: true`；对应平台恢复报告是 `output/preprod/acceptance-2026-10-08T04-53-01-494Z-c65638.json`。完整部署记录与边界见 [44-unified-admin-monitoring-rollout.md](44-unified-admin-monitoring-rollout.md)。
 
-已执行验证，均使用 Conda `cloud`：
+本轮关键验证均使用 Conda `cloud`：
 
 | 检查 | 结果 |
 | --- | --- |
-| 监控配置、资源保护、预发配置及接收器组合测试 | 79/79 通过 |
-| 后端全量测试 | 158 通过，2 个独立 PostgreSQL 专项跳过；对应专项随后独立通过 |
-| `npm run test:platform` | 22/22 通过，含真实 PostgreSQL 双 API 认证及隔离 |
-| `npm run test:scheduler` | 10/10 通过，含真实 PostgreSQL 调度、RLS、租约及持久化 |
-| 前端测试与构建 | 13/13 通过，构建通过 |
-| `npm run test:preprod:config` | 54/54 通过 |
-| Caddy 实际解析 | 缓存镜像、无网络临时容器，监控开/关配置与私有路径处理顺序通过 |
-| 原预发只读检查 | API 2/2、数据库 1/1 健康，Caddy 运行，就绪 HTTP 200 |
+| `npm run test:preprod` | 完整通过；双 API、数据库断连恢复、完整 stop/up、统一 Viewer 与应急登录 |
+| `npm run test:monitoring` | 完整通过；官方配置检查、真实告警/恢复、四组件重建与持久化 |
+| 管理端前端 | 15/15 通过，TypeScript 与 Vite 构建通过 |
+| 浏览器 | 管理员/观察员、五项导航、治理撤权、Grafana Viewer、1440/390/320px 通过 |
+| 最终服务 | API 2/2、数据库 1/1、四个监控服务各 1/1 健康 |
 
-套件覆盖有重叠，以上数字不相加。一次性数据库已清理，本轮没有部署或重启原预发。官方 promtool/amtool、真实告警闭环、监控持久化及页面验收仍待完成。
+套件覆盖有重叠，以上数字不相加。验收仅操作独立 `bairui_preprod`；业务库 `bairui` 与容器 `bairui-postgres` 未操作。
 
 ## 环境与入口
 
@@ -53,14 +50,14 @@ npm run monitor:status
 
 `monitor:up` 会先拉取固定镜像、运行官方配置与告警规则校验，之后才创建监控资源和更新预发。拉取失败时先修复 Docker Desktop 的网络；不要删除原预发数据卷，不要未经核实换成不明镜像。
 
-当前需要用户确认可用的 Docker Desktop 代理，或明确批准可用镜像来源。代理地址可以提供给开发者，但不要发送代理密码、数据库密码或 Secret。只在终端配置代理不代表 Docker Desktop 引擎拉取镜像也已使用该代理。
+固定镜像已存在并完成本机部署。其他机器若拉取失败，先修复 Docker 引擎网络；不要发送代理密码、数据库密码或 Secret，也不要用不明镜像替换固定来源。
 
 - 平台仍为 `https://localhost:8443`。
 - Grafana 为 `https://localhost:9443`，仅绑定本机回环地址，账号 `admin`，密码与平台注册账号完全独立。
 - 两个入口复用 3.1 的本地 CA，证书文件仍为 `output/preprod/root.crt`。脚本不自动修改 Windows 信任。
 - Prometheus、Alertmanager、接收器和 API 指标均不映射宿主机端口，不通过平台路由对外开放。
 
-## 统一管理端接入（2026-10-07，代码完成，尚未更新常驻预发）
+## 统一管理端接入（2026-10-08，常驻预发已更新）
 
 管理端 `/admin/` 现采用五项结构：平台概览、用户账号、Agent 服务、运行监控、告警。概览与告警由平台 API 使用固定 PromQL 只读查询 Prometheus；浏览器不能提交查询表达式或上游地址。上游未配置、超时、响应过大或异常统一返回 `monitoring_unavailable`，且不会清空管理身份或阻断用户/Agent 页面。
 
@@ -72,7 +69,7 @@ npm run monitor:status
 npm run test:monitoring:grafana-compat
 ```
 
-该命令只创建随机命名的临时容器和网络，验证 Viewer 映射和逐请求角色回收、伪造头拒绝、伪造会话拒绝、平台鉴权停机后登录静态资源与真实管理员登录，以及生产 Caddyfile 解析，最后清理资源。本节描述当前工作区代码；未经单独部署验证，不代表常驻预发已切换到统一入口。
+该命令只创建随机命名的临时容器和网络，验证 Viewer 映射和逐请求角色回收、伪造头拒绝、伪造会话拒绝、平台鉴权停机后登录静态资源与真实管理员登录，以及生产 Caddyfile 解析，最后清理资源。常驻预发还通过了真实平台会话、退出失效、暂停/封禁撤权和应急管理员入口验证。
 
 概览的新鲜度来自固定 `timestamp(...)` 查询取得的底层样本时间，不使用 Prometheus instant query 的评估时间。所有 Prometheus 请求的排队与执行共用 3 秒绝对截止时间，队列和并发数均有上限；饱和时快速返回统一 503，断开的页面不会留下长期无界查询。
 
@@ -134,6 +131,8 @@ npm run test:monitoring
 验收覆盖：官方配置和规则测试、受 CA 校验的 HTTPS、Grafana 认证与数据源、两份 API 独立采集、指标认证与隐私标记、平台路由隔离，以及真实 `2 -> 1 -> 2` API 副本故障和告警触发/恢复。随后重建监控容器检查记录、指标历史和 Secret 保留。故障步骤使用 `finally` 恢复双 API 并等待健康。
 
 报告写入 `output/preprod/monitoring-acceptance-*.json`，只保存脱敏检查结果。另需浏览器检查 Grafana 登录和中文看板，不能只用配置测试代替部署与页面验收。
+
+2026-10-08 浏览器验收已完成。Grafana 看板能通过平台 Viewer iframe 加载；Prometheus 插件请求缺失的 `zh-Hans` 翻译资源时会回退并留下 404/warning，不影响数据源、面板或鉴权结果。320px 概览曾因原始浮点数撑宽页面，现已改为带单位的短格式并增加溢出回归测试。
 
 ## 明确限制
 

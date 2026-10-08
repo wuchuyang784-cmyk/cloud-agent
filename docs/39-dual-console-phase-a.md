@@ -152,6 +152,8 @@ npm run test:monitoring:config
 
 新增只读端点为 `/api/admin/monitoring/overview`、`/api/admin/monitoring/alerts` 和仅供 Caddy 鉴权子请求使用的 `/api/admin/monitoring/access`。所有端点每次复核 Principal、账号状态和平台角色；监控数据状态与账号列表状态隔离，监控 503 不降级成管理端整体失败。详细部署和应急登录边界见 `docs/38-phase3-monitoring.md`。
 
+2026-10-08 该扩展已更新到独立常驻预发并完成管理员、观察员、暂停、解除、封禁撤销旧会话和重新登录的真实浏览器验证；部署、备份与报告索引见 `docs/44-unified-admin-monitoring-rollout.md`。这不改变 A 批最初交付时“未部署”的历史事实，也不代表业务库或公网生产已同步更新。
+
 - 三个管理 GET 路由：`/api/admin/me`、`/api/admin/users`、`/api/admin/agents`；所有响应 `no-store`，已知路径的写方法为 405。
 - actor 只来自服务端 Principal；`role`、`organizationId`、未知参数、重复参数被拒绝。查询每页最多 100 行，按 ID 游标推进，不执行全表总数查询。查询事务有 3 秒语句超时；超时或数据库异常只返回 `admin_unavailable`。
 - 数据库只读函数每次复核角色，返回固定字段，不暴露密码哈希、认证 subject、Cookie、Provider Key、配置、内部 Runtime URL 或对话内容。函数固定 schema 引用和 search_path，PUBLIC 无执行权。
