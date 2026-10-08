@@ -10,3 +10,12 @@ test('unified console exposes the approved five-item structure and fixed read-on
   assert.match(monitor, /只读运行监控/);
   assert.doesNotMatch(monitor, /password|token|Authorization/i);
 });
+
+test('overview metrics stay readable without widening a 320px viewport', async () => {
+  const overview = await readFile(new URL('../src/OverviewView.tsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
+
+  assert.match(overview, /formatMetricValue\(key, metric\?\.value\)/);
+  assert.match(styles, /body\s*\{[^}]*min-width:\s*0;/s);
+  assert.match(styles, /\.metric-card strong\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
+});

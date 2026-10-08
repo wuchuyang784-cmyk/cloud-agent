@@ -1,6 +1,6 @@
 :root { font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; color: #252b36; background: #f5f6f8; font-synthesis: none; font-size: 14px; letter-spacing: 0; }
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; }
+body { margin: 0; min-width: 0; }
 button, input, select { font: inherit; letter-spacing: 0; }
 button, a, input, select { -webkit-tap-highlight-color: transparent; }
 button, select { cursor: pointer; }
@@ -83,7 +83,7 @@ tbody tr:hover { background: #fafbfd; }
 .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .metric-card { min-height: 150px; padding: 20px; background: #fff; border: 1px solid #e2e5eb; border-radius: 6px; display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 10px; }
 .metric-card > svg { color: #0052d9; }
-.metric-card strong { grid-column: 1 / -1; font-size: 30px; font-weight: 600; }
+.metric-card strong { grid-column: 1 / -1; min-width: 0; font-size: 30px; font-weight: 600; overflow-wrap: anywhere; }
 .metric-card small { grid-column: 1 / -1; color: #7b8290; }
 .panel-state { min-height: 260px; background: #fff; border: 1px solid #e2e5eb; display: grid; place-items: center; color: #687382; }
 .panel-state.warning { color: #9d6111; }
