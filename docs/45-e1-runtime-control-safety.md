@@ -114,3 +114,5 @@ conda run -n cloud --no-capture-output npm run test:scheduler
 E1 尚不包含实际 Remote Orchestrator 服务、容器创建/终止、强制资源配额、TTL 回收、常驻 tick/LISTEN 进程、真实 Provider、Runtime Boundary 票据、用户执行入口或部署。状态和 dead 原因已持久化，但未接入生产指标/告警出口；tick 的汇总仅用于调用方和测试。真实进程上线前还须接入 stopping 年龄、dead 数量和外部故障告警。
 
 下一阶段先实现并隔离验收真实编排器的持久幂等、停止终止标记、资源限制与重启恢复，然后接入受限 Controller 的周期协调/告警，最后分阶段开放受控真实 Agent。不能将本轮 fake 协议验收写成真实资源回收或平台已上线。
+
+后续进展：2026-10-09 E2 已补充独立真实 Docker probe 编排与回收验收，见 [E2 记录](46-e2-isolated-orchestrator.md)。这不改变 E1 自身的 fake 验收范围；真实工作负载、平台常驻 Controller 和部署仍未开放。

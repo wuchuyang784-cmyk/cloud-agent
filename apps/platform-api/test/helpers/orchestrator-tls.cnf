@@ -1,0 +1,6 @@
+# Test certificate metadata only. Private keys are generated into a temporary directory.
+[req]
+distinguished_name = subject
+prompt = no
+[subject]
+CN = localhost

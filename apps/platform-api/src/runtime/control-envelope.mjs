@@ -177,6 +177,18 @@ export function verifyControlRequest({ method, path, body = '', headers, keys, n
   return metadata;
 }
 
+// Crypto validation is shared with the synchronous verifier; no metadata is
+// returned until the durable, atomic nonce insert has explicitly succeeded.
+export async function verifyControlRequestAsync(options) {
+  let nonceArguments;
+  const metadata = verifyControlRequest({ ...options, nonceStore: {
+    consume(...args) { nonceArguments = args; return true; },
+  } });
+  if (!options.nonceStore?.consume) throw new ControlEnvelopeError('control_nonce_store_invalid');
+  if (await options.nonceStore.consume(...nonceArguments) !== true) throw new ControlEnvelopeError('control_nonce_replayed');
+  return metadata;
+}
+
 export function signControlResponse({ status, requestId, requestNonce, body = '', keyId, secret }) {
   validateSecret(secret);
   validateKeyId(keyId);

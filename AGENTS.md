@@ -21,6 +21,16 @@
 
 ## 项目定位
 
+### E2：实际编排器与资源回收（2026-10-09，本机隔离验收，未部署）
+
+- 独立入口 `npm run orchestrator:isolation`，实现位于 `apps/platform-api/src/runtime/orchestrator/`；仅显式 isolation + 专用 ledger PostgreSQL + TLS 回环监听，不读取业务 `.env`，不进入 dev/app 启动链，不给平台 API Docker 权限。
+- 使用真实 Docker 容器内的固定 `isolation-probe-v1` 无模型进程；pi 仅为 E1 协议槽位，未接真实 pi/dsh/Provider。用户侧 Agent 写入/执行及旧 Worker/Runtime/Boundary 仍关闭，没有部署业务或预发。
+- 独立机器 ledger 持久 run 状态、创建/启动尝试、完整容器 ID、永久停止标记和原子 nonce；不新增业务迁移。creating 且容器暂缺为不确定，禁止重复创建或假确认 absent；旧 run 不重启，改名后仍按完整 ID 回收，删除未确认保持 stopping。
+- 固定本机 sha256 镜像与同安装 internal 网络，CPU/内存/PID、非 root、只读根、cap-drop/no-new-privileges，无任意 env/命令/卷/端口；启动参数不是对 Docker 管理员的沙箱。没有全局容量准入或真实工作负载挂载。
+- 独立 reaper 回收到期、异常退出和待停止容器，失败轮转不饿死后续记录；本阶段无业务活动，TTL 从首次意图起计，GET/健康检查/重试不续期。不承诺故障下释放时限，也未接平台路由/TTL 状态主动回流或生产告警。
+- `npm run test:orchestrator` 34 项全通过，含真实 cgroup/只读限制、精确删除、受限 PG、两池锁与 nonce、连接终止恢复、结果丢失、独立 HTTPS 进程强杀重启；TTL 用注入时钟后实际删除容器。E1 62、平台 25 全通过，后端 251 通过/8 数据库专项跳过/0 失败。
+- 专项仅使用一次性容器、临时库/网络/证书并按归属清理，业务 bairui 和常驻预发未操作；说明见 `docs/46-e2-isolated-orchestrator.md`。下一步为受限 Controller 常驻协调/告警及治理停止闭环，再分阶段接真实 Agent。
+
 ### E1：真实 Runtime 控制安全底座（2026-10-09，本机隔离验收，未部署）
 
 - 新增迁移 `039_runtime_control_fencing.sql`、Memory/PostgreSQL 双 Store、单 tick Controller 和签名远端控制协议；没有公开启停接口、常驻 Controller 或真实 Orchestrator，平台 Agent 写入/执行与旧 Worker/Runtime/Boundary 入口仍关闭。
