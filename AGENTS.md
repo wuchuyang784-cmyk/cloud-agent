@@ -21,6 +21,15 @@
 
 ## 项目定位
 
+### E1：真实 Runtime 控制安全底座（2026-10-09，本机隔离验收，未部署）
+
+- 新增迁移 `039_runtime_control_fencing.sql`、Memory/PostgreSQL 双 Store、单 tick Controller 和签名远端控制协议；没有公开启停接口、常驻 Controller 或真实 Orchestrator，平台 Agent 写入/执行与旧 Worker/Runtime/Boundary 入口仍关闭。
+- control generation、run generation 与路由版本共同围栏；停止先撤路由，只有匹配 stopped/absent 确认才清空 active run。旧 run 未确认停止时禁止新启动；启动重试耗尽原子生成补偿 stop，停止耗尽保留 stopping/dead，不宣称资源释放。
+- 回执须匹配 worker、request UUID、attempt 和未到期租约；启动记录治理版本，暂停后立即解除也不能复活旧 run。事务显式 READ COMMITTED，与 D1 同键治理锁协调；旧 Worker 仅领取 agent.provision，不允许与旧无代次控制副本混跑。
+- 请求/响应双向 HMAC，响应绑定本次 nonce；固定资源 DTO、不传 env/Provider Key，远端 URL allowlist，总超时覆盖正文。编排器必须持久化 stop 终止标记，absent 也须阻止迟到 PUT；当前仅 fake 合约验收，尚未证明真实容器回收。
+- `npm run test:runtime-control` 62 项通过，含真实 HTTP fake、受限 PostgreSQL、双向治理锁等待、审计外键锁序、系统请求 UUID 占位冲突、迟到回执、故障回滚及最小权限；后端全量 228 通过/7 个数据库专项跳过/0 失败，平台 25、治理 15、调度 26 项全通过。专项只用一次性数据库，业务 bairui 和常驻预发未操作。
+- 039 不依赖模拟调度 033/038；目标环境仍须备份、核对前置迁移和最小函数授权。E1 运行边界与测试记录见 `docs/45-e1-runtime-control-safety.md`。真实编排器、常驻协调/告警、配额与 TTL 执行、Provider 和用户入口留待后续，不写作真实 Agent 已上线。
+
 ### 统一管理与监控控制台（2026-10-08，常驻预发已更新）
 
 - 管理端采用五项导航：平台概览、用户账号、Agent 服务、运行监控、告警；客户端不增加跨用户管理或 Grafana入口。

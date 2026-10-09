@@ -10,6 +10,12 @@
 
 ---
 
+## 执行状态（2026-10-09）
+
+按批准的单 tick 实施范围完成代码、本机验收、复核修复与本地提交：E1 62 项、平台 25 项、治理 15 项、调度 26 项通过；后端 228 通过、7 项数据库专项跳过、0 失败。收尾代码提交 `320574e`；保留当前开发分支，不部署、不推送。
+
+实施补强包括治理版本、attempt 租约围栏、响应 nonce 绑定、全正文超时、不可复活的 stop 终止标记、启动耗尽补偿停止、READ COMMITTED 和旧 Worker 命令过滤。复核另修复审计外键隐式锁导致的死锁与可预测系统 request UUID 被调用者预占导致的 stop 丢失，并新增三项回归。下方代码块保留原计划草案，最终接口/函数签名、授权与边界以 `docs/45-e1-runtime-control-safety.md` 和源码为准；039 不依赖 033/038。
+
 ## 文件结构
 
 - Create `apps/platform-api/src/runtime/control-contract.mjs`：固定资源规格、命令和编排器响应 DTO 校验。
@@ -29,7 +35,7 @@
 - Create `apps/platform-api/test/runtime-control-postgres.test.mjs`：一次性 PostgreSQL、双连接并发、RLS 和治理强停。
 - Create `scripts/test-runtime-control.mjs`：独立测试库入口，不读取业务 `.env`。
 - Modify `package.json`：增加 `test:runtime-control`。
-- Create `docs/44-e1-runtime-control-safety.md`：中文边界、运行方式、迁移和验收记录模板。
+- Create `docs/45-e1-runtime-control-safety.md`：中文边界、运行方式、迁移和验收记录模板。
 - Modify `AGENTS.md`：验收完成后更新当前 E1 状态，明确未部署边界。
 
 ### Task 1: 固定控制 DTO 与资源边界
@@ -38,7 +44,7 @@
 - Create: `apps/platform-api/test/runtime-control-contract.test.mjs`
 - Create: `apps/platform-api/src/runtime/control-contract.mjs`
 
-- [ ] **Step 1: 写资源规格和响应校验的失败测试**
+- [x] **Step 1: 写资源规格和响应校验的失败测试**
 
 ```js
 import test from 'node:test';
@@ -75,13 +81,13 @@ test('inspect 只接受固定状态和匹配身份', () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试并确认因模块缺失失败**
+- [x] **Step 2: 运行测试并确认因模块缺失失败**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-contract.test.mjs`
 
 Expected: FAIL，错误包含 `ERR_MODULE_NOT_FOUND`。
 
-- [ ] **Step 3: 实现固定 DTO 校验**
+- [x] **Step 3: 实现固定 DTO 校验**
 
 ```js
 const RESOURCE_KEYS = ['cpuMillis', 'memoryBytes', 'pidsLimit', 'idleTtlSeconds'];
@@ -124,13 +130,13 @@ export function parseInspection(value, expected) {
 
 实现同文件私有 `assertIdentity` 与 `validIso`，并增加测试覆盖 engine 只允许 `pi/dsh`、ID/原因长度、非法 URL 字段不被静默接受。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-contract.test.mjs`
 
 Expected: PASS，0 failed。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add apps/platform-api/src/runtime/control-contract.mjs apps/platform-api/test/runtime-control-contract.test.mjs
@@ -143,7 +149,7 @@ git commit -m "feat: define runtime control contracts"
 - Create: `apps/platform-api/test/runtime-control-memory.test.mjs`
 - Create: `apps/platform-api/src/runtime/control-store.mjs`
 
-- [ ] **Step 1: 写 start/stop/迟到回执的失败测试**
+- [x] **Step 1: 写 start/stop/迟到回执的失败测试**
 
 ```js
 const store = new MemoryRuntimeControlStore({ agents: [{
@@ -162,13 +168,13 @@ assert.equal(store.route('a1'), null);
 
 增加独立测试覆盖：相同 request 重放、request 内容冲突、expected generation 冲突、同态 start no-op、stop 未确认保持 stopping、旧 stop 不能清除新 run、inactive 账号拒绝 start、active 恢复不自动 start。
 
-- [ ] **Step 2: 运行并确认因导出缺失失败**
+- [x] **Step 2: 运行并确认因导出缺失失败**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-memory.test.mjs`
 
 Expected: FAIL，错误指向 `MemoryRuntimeControlStore` 缺失。
 
-- [ ] **Step 3: 实现统一 Memory 接口**
+- [x] **Step 3: 实现统一 Memory 接口**
 
 ```js
 export class MemoryRuntimeControlStore {
@@ -210,13 +216,13 @@ export class MemoryRuntimeControlStore {
 
 实现私有 `#requestStart/#requestStop/#requestGovernanceStop/#commitStarted/#commitStopped/#withAgentLock`：使用 `crypto.randomUUID()` 生成 run/command ID，请求摘要由键排序后的规范化 JSON 生成。所有状态转换返回固定 `{ result, generation, runId, replayed, commandRequestId }`，错误使用稳定 code；每个私有转换分别由本任务列出的测试先覆盖再写代码。
 
-- [ ] **Step 4: 运行 Memory 测试确认通过**
+- [x] **Step 4: 运行 Memory 测试确认通过**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-contract.test.mjs apps/platform-api/test/runtime-control-memory.test.mjs`
 
 Expected: PASS，0 failed。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add apps/platform-api/src/runtime/control-store.mjs apps/platform-api/test/runtime-control-memory.test.mjs
@@ -230,7 +236,7 @@ git commit -m "feat: add fenced memory runtime control"
 - Create: `packages/db/migrations/039_runtime_control_fencing.sql`
 - Create: `apps/platform-api/src/runtime/postgres-control-store.mjs`
 
-- [ ] **Step 1: 写 PostgreSQL 失败测试 fixture**
+- [x] **Step 1: 写 PostgreSQL 失败测试 fixture**
 
 测试创建独立 schema 和 `runtime_app_*`、`runtime_controller_*` 两个 `NOLOGIN NOSUPERUSER NOBYPASSRLS` 角色，按文件名顺序导入 001–039，分别只授 request/read 函数和 claim/commit/reconcile 函数。写入用户、组织、pi Agent 后断言：
 
@@ -247,13 +253,13 @@ assert.equal((await elevated.query('SELECT route_version FROM runtime_routes WHE
 
 同文件先加入迁移增量/重复执行、generation=0 历史多行、直接表写拒绝、request replay/conflict、stop 先删 route、stale start 补偿 stop、旧 stop 不清新 run、两个连接并发、租约恢复的测试。
 
-- [ ] **Step 2: 运行测试确认 039 缺失导致失败**
+- [x] **Step 2: 运行测试确认 039 缺失导致失败**
 
 Run: `conda run -n cloud --no-capture-output node --test --test-concurrency=1 apps/platform-api/test/runtime-control-postgres.test.mjs`
 
 Expected: FAIL，错误显示 `039_runtime_control_fencing.sql` 或目标函数不存在。
 
-- [ ] **Step 3: 编写 039 表结构和约束**
+- [x] **Step 3: 编写 039 表结构和约束**
 
 迁移使用单事务，核心结构固定为：
 
@@ -294,7 +300,7 @@ CREATE UNIQUE INDEX control_outbox_request_uidx ON control_outbox(request_id) WH
 
 用 catalog 查找并替换 `agent_engine_runs.status` CHECK，使其精确允许 `stopping`；迁移第二次运行不得改变函数 owner/ACL 或历史数据。新增 active_run 外键时使用 `DEFERRABLE INITIALLY DEFERRED`，并验证 run 属于同一 Agent。
 
-- [ ] **Step 4: 实现七个受限数据库函数**
+- [x] **Step 4: 实现七个受限数据库函数**
 
 函数签名固定为：
 
@@ -310,7 +316,7 @@ runtime_control_reconcile_governance(text,integer) RETURNS jsonb
 
 全部使用 `SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET row_security=off`，通过 `%I` 固定迁移 schema；撤销 PUBLIC EXECUTE。request 函数先取用户治理 advisory lock，再锁 Agent/control；commit 使用 Agent control 行锁与 generation CAS；claim 只选 `event_type LIKE 'runtime.%'`；complete 只更新同 worker 持有的租约。reconcile 按 owner/agent 稳定顺序，对 suspended/banned 运行项执行一次 generation 提升、route 删除和 stop 入队。
 
-- [ ] **Step 5: 实现 PostgreSQL 薄适配器**
+- [x] **Step 5: 实现 PostgreSQL 薄适配器**
 
 ```js
 export class PostgresRuntimeControlStore {
@@ -332,13 +338,13 @@ export class PostgresRuntimeControlStore {
 
 `functionName` 只来自类内固定字符串，不接收调用方输入。`safeDatabaseCode` 将已知 SQLSTATE/函数错误映射为稳定 code，其他错误统一为 `runtime_control_unavailable`；`RuntimeControlError` 不附带 SQL、原始 detail 或连接信息。
 
-- [ ] **Step 6: 运行 PostgreSQL 专项确认通过**
+- [x] **Step 6: 运行 PostgreSQL 专项确认通过**
 
 Run: `conda run -n cloud --no-capture-output node --test --test-concurrency=1 apps/platform-api/test/runtime-control-postgres.test.mjs`
 
 Expected: PASS，0 failed；测试结束删除 schema 和临时角色。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```powershell
 git add packages/db/migrations/039_runtime_control_fencing.sql apps/platform-api/src/runtime/postgres-control-store.mjs apps/platform-api/test/runtime-control-postgres.test.mjs
@@ -351,7 +357,7 @@ git commit -m "feat: persist fenced runtime control"
 - Create: `apps/platform-api/test/runtime-control-envelope.test.mjs`
 - Create: `apps/platform-api/src/runtime/control-envelope.mjs`
 
-- [ ] **Step 1: 写请求/响应签名失败测试**
+- [x] **Step 1: 写请求/响应签名失败测试**
 
 ```js
 const signed = signControlRequest({ method: 'PUT', path: '/v1/runs/r1', body, requestId, keyId: 'k1', secret, now: 1_800_000_000_000, nonce: 'nonce-1' });
@@ -362,13 +368,13 @@ assert.throws(() => verifyControlRequest({ method: 'PUT', path: '/v1/runs/r1', b
 
 增加 response status/body/request ID 绑定、61 秒过期、未知 key ID、body 篡改、双 key 轮换测试。
 
-- [ ] **Step 2: 运行并确认模块缺失失败**
+- [x] **Step 2: 运行并确认模块缺失失败**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-envelope.test.mjs`
 
 Expected: FAIL，`ERR_MODULE_NOT_FOUND`。
 
-- [ ] **Step 3: 实现 canonical HMAC 与 nonce store 接口**
+- [x] **Step 3: 实现 canonical HMAC 与 nonce store 接口**
 
 ```js
 export function canonicalRequest({ version = 'v1', method, path, timestamp, nonce, requestId, body }) {
@@ -405,13 +411,13 @@ export function verifyControlResponse(input) {
 
 同文件实现 `sha256/hmac/verifyMac/requestMetadata/responseMetadata`，其中 `verifyMac` 先检查十六进制长度再调用 `timingSafeEqual`。nonce store 只依赖 `consume(keyId, nonce, expiresAt)`，测试使用 Map；不在此模块加入网络或业务状态。
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-envelope.test.mjs`
 
 Expected: PASS，0 failed。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add apps/platform-api/src/runtime/control-envelope.mjs apps/platform-api/test/runtime-control-envelope.test.mjs
@@ -425,7 +431,7 @@ git commit -m "feat: sign runtime control protocol"
 - Modify: `apps/platform-api/src/runtime/orchestration/remote-driver.mjs`
 - Modify: `apps/platform-api/src/runtime/orchestration/index.mjs`
 
-- [ ] **Step 1: 替换旧远端驱动测试并确认失败**
+- [x] **Step 1: 替换旧远端驱动测试并确认失败**
 
 测试构造已签名 fake response，断言请求为 `PUT /v1/runs/{runId}`、body 无 `env`，并覆盖：缺 HTTPS（测试显式允许的 `.test` origin 除外）、缺 key、重定向、超时、超限、未签名、身份错配、普通 404 stop 均失败；结构化 signed absent 才成功。另断言 `inspect` 使用 `GET /v1/runs/{runId}`，只返回身份匹配的 `starting/running/stopping/stopped/absent`。
 
@@ -443,7 +449,7 @@ Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/
 
 Expected: FAIL，旧 driver 仍调用 `/instances` 或接受不安全 stop。
 
-- [ ] **Step 2: 实现无状态 v1 客户端**
+- [x] **Step 2: 实现无状态 v1 客户端**
 
 ```js
 async provision(spec) {
@@ -465,13 +471,13 @@ async inspect(spec) {
 
 删除 remote 路径对 `this.instances`、`waitHealthy`、`route` 的依赖；构造器要求 URL、key ID、secret，配置绝对截止时间、最大响应字节、`redirect:'error'`，并验证响应签名和内部 URL allowlist。`canRun()` 对缺任一强制项返回 fail-closed 原因。
 
-- [ ] **Step 3: 运行 driver 与协议测试确认通过**
+- [x] **Step 3: 运行 driver 与协议测试确认通过**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-contract.test.mjs apps/platform-api/test/runtime-control-envelope.test.mjs apps/platform-api/test/runtime-driver.test.mjs`
 
 Expected: PASS；旧 LocalProcessDriver 回归继续通过。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```powershell
 git add apps/platform-api/src/runtime/orchestration/remote-driver.mjs apps/platform-api/src/runtime/orchestration/index.mjs apps/platform-api/test/runtime-driver.test.mjs
@@ -485,7 +491,7 @@ git commit -m "feat: harden remote runtime driver"
 - Create: `apps/platform-api/test/runtime-controller.test.mjs`
 - Create: `apps/platform-api/src/runtime/controller.mjs`
 
-- [ ] **Step 1: 写 Controller 失败测试**
+- [x] **Step 1: 写 Controller 失败测试**
 
 使用 Memory store + fake orchestrator，覆盖 happy path、start 在途被 stop、start/stop 结果未知时调用 inspect 收敛、stop 500/timeout、租约重放、dead 保持 stopping 和未知事件不被领取。
 
@@ -500,13 +506,13 @@ assert.equal(store.run(start.runId).status, 'stopping');
 assert.equal(store.route('a1'), null);
 ```
 
-- [ ] **Step 2: 运行并确认 Controller 缺失失败**
+- [x] **Step 2: 运行并确认 Controller 缺失失败**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-controller.test.mjs`
 
 Expected: FAIL，`RuntimeController` 模块不存在。
 
-- [ ] **Step 3: 实现单 tick 控制器**
+- [x] **Step 3: 实现单 tick 控制器**
 
 ```js
 export class RuntimeController {
@@ -539,13 +545,13 @@ export class RuntimeController {
 
 `#commitObserved` 对 start+running 走 commitStarted，对 stop+stopped/absent 走 commitStopped；其他观察状态返回 false 并进入重试。`failed` 命令按 store 固定退避重新入队；dead 保持状态并计数。处理 start 成功但 CAS stale 时，store 原子确保补偿 stop 已存在。控制器只记录稳定 error code。
 
-- [ ] **Step 4: 运行 Controller/Memory 测试确认通过**
+- [x] **Step 4: 运行 Controller/Memory 测试确认通过**
 
 Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/runtime-control-memory.test.mjs apps/platform-api/test/runtime-controller.test.mjs`
 
 Expected: PASS，0 failed。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add apps/platform-api/src/runtime/controller.mjs apps/platform-api/test/helpers/fake-runtime-orchestrator.mjs apps/platform-api/test/runtime-controller.test.mjs apps/platform-api/src/runtime/control-store.mjs
@@ -559,7 +565,7 @@ git commit -m "feat: process runtime control commands"
 - Modify: `packages/db/migrations/039_runtime_control_fencing.sql`
 - Modify: `apps/platform-api/src/runtime/postgres-control-store.mjs`
 
-- [ ] **Step 1: 增加治理与竞态失败测试**
+- [x] **Step 1: 增加治理与竞态失败测试**
 
 ```js
 await elevated.query("INSERT INTO platform_account_governance(user_id,status,version) VALUES($1,'suspended',1)", [ownerUserId]);
@@ -575,23 +581,23 @@ assert.equal((await controllerStore.reconcileGovernance({ workerId: 'controller-
 
 再用专用连接 `LISTEN bairui_runtime_governance`，提交 suspended/banned 变更后断言只收到目标内部 user ID；事务回滚不得发出通知。该通知只是即时 tick 提示，周期 reconcile 仍是正确性来源。
 
-- [ ] **Step 2: 运行并观察至少一个预期失败**
+- [x] **Step 2: 运行并观察至少一个预期失败**
 
 Run: `conda run -n cloud --no-capture-output node --test --test-concurrency=1 apps/platform-api/test/runtime-control-postgres.test.mjs`
 
 Expected: FAIL 于缺少治理协调、锁顺序或授权断言之一。
 
-- [ ] **Step 3: 完成数据库锁顺序、回滚和授权实现**
+- [x] **Step 3: 完成数据库锁顺序、回滚和授权实现**
 
 在 039 中让 request/reconcile 都先取得 `hashtextextended('<schema>:governance:session:' || auth_id,0)` 对应身份锁，再锁 Agent control；reconcile 的候选按 `owner_user_id,agent_id` 排序并有 limit。所有状态、route 和 outbox 变更处于同一事务，治理状态不可读时抛错而非按 active 放行。新增 `AFTER INSERT OR UPDATE OF status` trigger，在状态变为 suspended/banned 时执行 `pg_notify('bairui_runtime_governance', NEW.user_id)`；PostgreSQL 只在事务提交后投递通知。
 
-- [ ] **Step 4: 运行 PostgreSQL 专项确认通过**
+- [x] **Step 4: 运行 PostgreSQL 专项确认通过**
 
 Run: `conda run -n cloud --no-capture-output node --test --test-concurrency=1 apps/platform-api/test/runtime-control-postgres.test.mjs`
 
 Expected: PASS，0 failed，临时角色/schema 均清理。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add packages/db/migrations/039_runtime_control_fencing.sql apps/platform-api/src/runtime/postgres-control-store.mjs apps/platform-api/test/runtime-control-postgres.test.mjs
@@ -603,10 +609,10 @@ git commit -m "test: verify runtime governance fencing"
 **Files:**
 - Create: `scripts/test-runtime-control.mjs`
 - Modify: `package.json`
-- Create: `docs/44-e1-runtime-control-safety.md`
+- Create: `docs/45-e1-runtime-control-safety.md`
 - Modify: `AGENTS.md`
 
-- [ ] **Step 1: 写 runner 静态失败测试**
+- [x] **Step 1: 写 runner 静态失败测试**
 
 在 `apps/platform-api/test/runtime-control-contract.test.mjs` 增加读取根 `package.json` 和 runner 的测试，断言 script 不加载 `.env`、清除 `BAIRUI_*`/`BETTER_AUTH_*`/`DATABASE_URL`、只创建一次性随机容器并运行 E1 专项文件。
 
@@ -614,7 +620,7 @@ Run: `conda run -n cloud --no-capture-output node --test apps/platform-api/test/
 
 Expected: FAIL，`test:runtime-control` 不存在。
 
-- [ ] **Step 2: 实现独立测试 runner 和 npm script**
+- [x] **Step 2: 实现独立测试 runner 和 npm script**
 
 ```json
 "test:runtime-control": "node scripts/test-runtime-control.mjs"
@@ -622,20 +628,20 @@ Expected: FAIL，`test:runtime-control` 不存在。
 
 runner 复用 `scripts/test-scheduler.mjs` 的随机容器、`waitForPostgres`、环境清洗和 finally 删除模式，设置 `BAIRUI_RUNTIME_CONTROL_TEST_DATABASE_URL`，串行运行：contract、envelope、memory、driver、controller、postgres 六个文件。不得读取项目 `.env`，不得连接 `bairui` 或 `bairui_preprod`。
 
-- [ ] **Step 3: 编写中文接入文档并更新项目状态**
+- [x] **Step 3: 编写中文接入文档并更新项目状态**
 
-`docs/44-e1-runtime-control-safety.md` 写明：状态机与 generation、039 前置/备份/最小授权、Controller/Orchestrator 配置字段、测试命令、故障语义、回滚原则、未开放用户执行和未部署边界。`AGENTS.md` 只在专项与回归实际通过后记录准确测试结果；不写真实 Runtime 已上线。
+`docs/45-e1-runtime-control-safety.md` 写明：状态机与 generation、039 前置/备份/最小授权、Controller/Orchestrator 配置字段、测试命令、故障语义、回滚原则、未开放用户执行和未部署边界。`AGENTS.md` 只在专项与回归实际通过后记录准确测试结果；不写真实 Runtime 已上线。
 
-- [ ] **Step 4: 运行 E1 专项**
+- [x] **Step 4: 运行 E1 专项**
 
 Run: `conda run -n cloud --no-capture-output npm run test:runtime-control`
 
 Expected: 所有 E1 测试 PASS；输出确认一次性数据库创建和清理。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
-git add scripts/test-runtime-control.mjs package.json docs/44-e1-runtime-control-safety.md AGENTS.md apps/platform-api/test/runtime-control-contract.test.mjs
+git add scripts/test-runtime-control.mjs package.json docs/45-e1-runtime-control-safety.md AGENTS.md apps/platform-api/test/runtime-control-contract.test.mjs
 git commit -m "docs: add E1 runtime control acceptance"
 ```
 
@@ -644,13 +650,13 @@ git commit -m "docs: add E1 runtime control acceptance"
 **Files:**
 - Modify only when a failing regression has a demonstrated E1 cause.
 
-- [ ] **Step 1: 运行后端全量测试**
+- [x] **Step 1: 运行后端全量测试**
 
 Run: `conda run -n cloud --no-capture-output npm test --prefix apps/platform-api`
 
 Expected: PASS，0 failed。
 
-- [ ] **Step 2: 运行平台、治理和调度隔离验收**
+- [x] **Step 2: 运行平台、治理和调度隔离验收**
 
 ```powershell
 conda run -n cloud --no-capture-output npm run test:platform
@@ -660,13 +666,13 @@ conda run -n cloud --no-capture-output npm run test:scheduler
 
 Expected: 三项均退出 0；每项一次性数据库/容器清理完成。
 
-- [ ] **Step 3: 审计密钥、危险参数和围栏回退**
+- [x] **Step 3: 审计密钥、危险参数和围栏回退**
 
-Run: `rg -n "local-only-change-this-secret|docker\.sock|spec\.env|payload\.env|runtime\.start\.requested|runtime\.stop\.requested|run_generation|route_version" apps/platform-api/src packages/db/migrations/039_runtime_control_fencing.sql docs/44-e1-runtime-control-safety.md`
+Run: `rg -n "local-only-change-this-secret|docker\.sock|spec\.env|payload\.env|runtime\.start\.requested|runtime\.stop\.requested|run_generation|route_version" apps/platform-api/src packages/db/migrations/039_runtime_control_fencing.sql docs/45-e1-runtime-control-safety.md`
 
 Expected: E1 remote 控制路径没有默认密钥、docker.sock 或任意 env；start/stop 事件和 generation/route fence 均有实现与文档命中。
 
-- [ ] **Step 4: 检查工作区和提交历史**
+- [x] **Step 4: 检查工作区和提交历史**
 
 Run: `rtk git status --short; rtk git diff HEAD~8..HEAD --check; git log --oneline -10`
 
