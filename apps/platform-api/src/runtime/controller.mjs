@@ -1,8 +1,19 @@
-const SAFE_ERROR_CODE = /^[a-zA-Z0-9_.:-]{1,100}$/;
+const SAFE_ERROR_CODES = new Set([
+  'orchestrator_bad_response', 'orchestrator_rejected', 'orchestrator_response_too_large',
+  'orchestrator_result_unknown', 'remote_driver_unavailable', 'runtime_url_forbidden', 'stop_not_confirmed',
+  'orchestrator_identity_conflict', 'runtime_command_lease_lost', 'runtime_receipt_mismatch',
+  'runtime_control_busy', 'runtime_control_timeout', 'runtime_control_unavailable',
+  'runtime_control_invalid', 'runtime_control_forbidden', 'runtime_control_conflict', 'runtime_control_reference_invalid',
+  'control_body_invalid', 'control_key_id_invalid', 'control_key_unknown', 'control_method_invalid',
+  'control_nonce_invalid', 'control_nonce_replayed', 'control_nonce_store_invalid', 'control_path_invalid',
+  'control_request_id_invalid', 'control_response_mismatch', 'control_secret_invalid',
+  'control_signature_expired', 'control_signature_invalid', 'control_status_invalid',
+  'control_timestamp_invalid', 'control_version_invalid',
+]);
 
 export function safeRuntimeErrorCode(error) {
   const code = String(error?.code ?? 'runtime_control_error');
-  return SAFE_ERROR_CODE.test(code) ? code : 'runtime_control_error';
+  return SAFE_ERROR_CODES.has(code) ? code : 'runtime_control_error';
 }
 
 export class RuntimeController {
@@ -19,15 +30,18 @@ export class RuntimeController {
 
   async tick() {
     const reconciliation = await this.store.reconcileGovernance({ workerId: this.workerId, limit: this.batchSize });
-    const commands = await this.store.claimCommands(this.workerId, this.batchSize);
     const summary = {
       reconciled: Number(reconciliation?.stopped ?? 0),
-      claimed: commands.length,
+      claimed: 0,
       succeeded: 0,
       retried: 0,
       dead: 0,
     };
-    for (const command of commands) {
+    // Claim only when ready to execute; a slow predecessor must not consume another command's lease.
+    for (let index = 0; index < this.batchSize; index += 1) {
+      const [command] = await this.store.claimCommands(this.workerId, 1);
+      if (!command) break;
+      summary.claimed += 1;
       const outcome = await this.#handle(command);
       summary[outcome] += 1;
     }
@@ -39,19 +53,29 @@ export class RuntimeController {
       await this.store.completeCommand({
         workerId: this.workerId,
         commandId: command.id,
+        leaseAttempt: command.attempts,
         status: 'dead',
         errorCode: 'runtime_command_unknown',
       });
       return 'dead';
     }
     const spec = { ...command.payload, requestId: command.requestId };
+    if (command.attempts > this.maxAttempts) {
+      await this.#complete(command, 'dead', 'runtime_attempts_exhausted');
+      return 'dead';
+    }
     try {
+      const prepared = await this.store.prepareCommand({ workerId: this.workerId, requestId: command.requestId, leaseAttempt: command.attempts });
+      if (!prepared.eligible) {
+        await this.#complete(command, 'succeeded');
+        return 'succeeded';
+      }
       if (command.eventType === 'runtime.start.requested') {
         const result = await this.driver.provision(spec);
-        await this.store.commitStarted({ workerId: this.workerId, requestId: command.requestId, ...command.payload, ...result });
+        await this.store.commitStarted({ ...command.payload, ...result, workerId: this.workerId, requestId: command.requestId, leaseAttempt: command.attempts });
       } else {
         const result = await this.driver.stop(spec);
-        await this.store.commitStopped({ workerId: this.workerId, requestId: command.requestId, ...command.payload, ...result });
+        await this.store.commitStopped({ ...command.payload, ...result, workerId: this.workerId, requestId: command.requestId, leaseAttempt: command.attempts });
       }
       await this.#complete(command, 'succeeded');
       return 'succeeded';
@@ -81,6 +105,7 @@ export class RuntimeController {
         requestId: command.requestId,
         ...command.payload,
         ...observed,
+        leaseAttempt: command.attempts,
       });
       return true;
     }
@@ -90,6 +115,7 @@ export class RuntimeController {
         requestId: command.requestId,
         ...command.payload,
         ...observed,
+        leaseAttempt: command.attempts,
         confirmedAt: observed.confirmedAt ?? observed.observedAt,
       });
       return true;
@@ -101,6 +127,7 @@ export class RuntimeController {
     const completed = await this.store.completeCommand({
       workerId: this.workerId,
       commandId: command.id,
+      leaseAttempt: command.attempts,
       status,
       errorCode,
     });

@@ -55,6 +55,14 @@ export class FakeRuntimeOrchestrator {
     this.nextDrop = method;
   }
 
+  holdNext(method) {
+    let entered; let release;
+    const arrived = new Promise(resolve => { entered = resolve; });
+    const resumed = new Promise(resolve => { release = resolve; });
+    this.nextHold = { method, entered, resumed };
+    return { arrived, release };
+  }
+
   failEveryStop(status = 503) {
     this.persistentStopStatus = status;
   }
@@ -75,7 +83,14 @@ export class FakeRuntimeOrchestrator {
         nonceStore: this.nonces,
       });
       const body = raw ? JSON.parse(raw) : null;
+      response.requestNonce = metadata.nonce;
       this.requests.push({ method: request.method, path: request.url, body });
+      if (this.nextHold?.method === request.method) {
+        const hold = this.nextHold;
+        this.nextHold = null;
+        hold.entered();
+        await hold.resumed;
+      }
 
       if (this.nextFailure?.method === request.method) {
         const { status } = this.nextFailure;
@@ -96,6 +111,10 @@ export class FakeRuntimeOrchestrator {
       const runId = decodeURIComponent(match[1]);
       if (request.method === 'PUT' && !match[2]) {
         const existing = this.runs.get(runId);
+        if (existing && ['stopped', 'absent'].includes(existing.status)) {
+          this.#json(response, 409, metadata.requestId, { error: 'run_fenced' });
+          return;
+        }
         if (existing && JSON.stringify(existing.request) !== JSON.stringify(body)) {
           this.#json(response, 409, metadata.requestId, { error: 'idempotency_conflict' });
           return;
@@ -128,25 +147,28 @@ export class FakeRuntimeOrchestrator {
       }
       if (request.method === 'GET' && !match[2]) {
         const run = this.runs.get(runId);
-        this.#json(response, 200, metadata.requestId, run ? {
+        if (!run) {
+          this.#json(response, 404, metadata.requestId, { error: 'run_not_found' });
+          return;
+        }
+        this.#json(response, 200, metadata.requestId, {
           agentId: run.agentId,
           runId,
           runGeneration: run.runGeneration,
           status: run.status,
           ...(run.status === 'running' ? { orchestratorRef: run.orchestratorRef, runtimeUrl: run.runtimeUrl } : {}),
           observedAt: '2026-10-08T00:00:01.000Z',
-        } : {
-          agentId: body?.agentId ?? 'agent-1',
-          runId,
-          runGeneration: body?.runGeneration ?? 1,
-          status: 'absent',
-          observedAt: '2026-10-08T00:00:01.000Z',
         });
         return;
       }
       if (request.method === 'POST' && match[2]) {
         const run = this.runs.get(runId);
+        if (run && (run.agentId !== body.agentId || run.runGeneration !== body.runGeneration)) {
+          this.#json(response, 409, metadata.requestId, { error: 'identity_mismatch' });
+          return;
+        }
         if (run) run.status = 'stopped';
+        else this.runs.set(runId, { agentId: body.agentId, runId, runGeneration: body.runGeneration, status: 'absent' });
         if (this.nextDrop === 'POST') {
           this.nextDrop = null;
           request.socket.destroy();
@@ -172,7 +194,7 @@ export class FakeRuntimeOrchestrator {
     const raw = JSON.stringify(value);
     response.writeHead(status, {
       'content-type': 'application/json',
-      ...signControlResponse({ status, requestId, body: raw, keyId: this.keyId, secret: this.secret }),
+      ...signControlResponse({ status, requestId, requestNonce: response.requestNonce, body: raw, keyId: this.keyId, secret: this.secret }),
     });
     response.end(raw);
   }

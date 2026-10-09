@@ -12,7 +12,7 @@ import {
   parseStopConfirmation,
 } from '../control-contract.mjs';
 import { signControlRequest, verifyControlResponse } from '../control-envelope.mjs';
-import { RuntimeDriver, RuntimeDriverError } from './runtime-driver.mjs';
+import { RuntimeDriverError } from './runtime-driver.mjs';
 
 function csv(value) {
   if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
@@ -28,38 +28,46 @@ function safeHostname(value) {
   return String(value).toLowerCase().replace(/\.$/, '');
 }
 
-async function readBoundedBody(response, maximumBytes) {
+async function readBoundedBody(response, maximumBytes, signal) {
   if (response.body?.getReader) {
     const reader = response.body.getReader();
+    const cancel = () => { void reader.cancel().catch(() => {}); };
+    signal.addEventListener('abort', cancel, { once: true });
     const chunks = [];
     let total = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maximumBytes) {
-        await reader.cancel().catch(() => {});
-        throw new RuntimeDriverError('orchestrator_response_too_large', '编排器响应超过字节上限');
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maximumBytes) {
+          cancel();
+          throw new RuntimeDriverError('orchestrator_response_too_large', '编排器响应超过字节上限');
+        }
+        chunks.push(Buffer.from(value));
       }
-      chunks.push(Buffer.from(value));
+      return Buffer.concat(chunks, total).toString('utf8');
+    } finally {
+      signal.removeEventListener('abort', cancel);
+      reader.releaseLock();
     }
-    return Buffer.concat(chunks, total).toString('utf8');
   }
   const buffer = Buffer.from(await response.arrayBuffer());
   if (buffer.byteLength > maximumBytes) throw new RuntimeDriverError('orchestrator_response_too_large', '编排器响应超过字节上限');
   return buffer.toString('utf8');
 }
 
-export class RemoteRuntimeDriver extends RuntimeDriver {
+export class RemoteRuntimeDriver {
   constructor(options = {}) {
-    super(options);
+    this.env = options.env ?? process.env;
+    this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
     this.orchestratorUrl = options.orchestratorUrl ?? this.env.BAIRUI_RUNTIME_ORCHESTRATOR_URL ?? null;
     this.orchestratorKeyId = options.orchestratorKeyId ?? this.env.BAIRUI_RUNTIME_CONTROL_KEY_ID ?? null;
     this.orchestratorSecret = options.orchestratorSecret ?? this.env.BAIRUI_RUNTIME_CONTROL_SECRET ?? null;
     this.allowedRuntimeHosts = new Set(csv(options.allowedRuntimeHosts ?? this.env.BAIRUI_RUNTIME_ALLOWED_HOSTS).map(safeHostname));
     this.allowedRuntimeCidrs = csv(options.allowedRuntimeCidrs ?? this.env.BAIRUI_RUNTIME_ALLOWED_CIDRS);
     this.runtimeAddressTrust = this.allowedRuntimeCidrs.length ? proxyaddr.compile(this.allowedRuntimeCidrs) : null;
-    this.requestTimeoutMs = boundedInteger(options.requestTimeoutMs ?? this.env.BAIRUI_RUNTIME_CONTROL_TIMEOUT_MS, 10_000, 100, 120_000);
+    this.requestTimeoutMs = boundedInteger(options.requestTimeoutMs ?? this.env.BAIRUI_RUNTIME_CONTROL_TIMEOUT_MS, 10_000, 100, 25_000);
     this.maxResponseBytes = boundedInteger(options.maxResponseBytes ?? this.env.BAIRUI_RUNTIME_CONTROL_MAX_RESPONSE_BYTES, 65_536, 1024, 1_048_576);
     this.allowInsecureHttp = options.allowInsecureHttp === true && this.env.NODE_ENV === 'test';
     this.baseUrl = this.#parseBaseUrl();
@@ -186,10 +194,11 @@ export class RemoteRuntimeDriver extends RuntimeDriver {
         }),
         timeoutPromise,
       ]);
-      const raw = await readBoundedBody(response, this.maxResponseBytes);
+      const raw = await Promise.race([readBoundedBody(response, this.maxResponseBytes, controller.signal), timeoutPromise]);
       verifyControlResponse({
         status: response.status,
         requestId,
+        requestNonce: headers['x-bairui-control-nonce'],
         body: raw,
         headers: response.headers,
         keys: { [this.orchestratorKeyId]: this.orchestratorSecret },

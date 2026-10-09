@@ -20,13 +20,6 @@ function requestHash(value) {
   return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex');
 }
 
-function governanceRequestId(userId, version, agentId) {
-  const hex = createHash('sha256').update(`${userId}\n${version}\n${agentId}`).digest('hex').slice(0, 32).split('');
-  hex[12] = '5';
-  hex[16] = ['8', '9', 'a', 'b'][Number.parseInt(hex[16], 16) % 4];
-  return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
-}
-
 function cleanReason(value) {
   const reason = typeof value === 'string' ? value.trim() : '';
   if (reason.length < 1 || reason.length > 500 || CONTROL_CHARACTERS.test(reason)) {
@@ -84,6 +77,48 @@ export class MemoryRuntimeControlStore {
     return this.#withAgentLock(input.agentId, () => this.#requestStart(input));
   }
 
+  prepareCommand(input) {
+    const command = this.#leasedCommand(input);
+    return this.#withAgentLock(command.aggregateId, () => {
+      this.#leasedCommand(input);
+      const control = this.controls.get(command.aggregateId);
+      this.#coordinateControl(control);
+      const eligible = command.eventType === 'runtime.stop.requested'
+        || (control.desiredState === 'running' && control.activeRunId === command.payload.runId
+          && control.generation === command.payload.runGeneration);
+      return eligible ? { eligible: true } : { eligible: false, reason: 'superseded' };
+    });
+  }
+
+  #leasedCommand({ workerId, requestId, leaseAttempt }) {
+    const command = this.commands.find(row => row.requestId === requestId);
+    if (!command || command.status !== 'leased' || command.leasedBy !== workerId
+      || command.attempts !== leaseAttempt || command.leaseUntil <= this.clock()) throw new RuntimeControlError('runtime_command_lease_lost');
+    return command;
+  }
+
+  #receipt(input, eventType) {
+    const command = this.#leasedCommand(input);
+    if (command.eventType !== eventType || command.payload.agentId !== input.agentId
+      || command.payload.runId !== input.runId || command.payload.runGeneration !== input.runGeneration
+      || (eventType === 'runtime.stop.requested' && command.payload.fenceGeneration !== input.fenceGeneration)) {
+      throw new RuntimeControlError('runtime_receipt_mismatch');
+    }
+    return command;
+  }
+
+  #coordinateControl(control) {
+    const governance = this.#governance(control.ownerUserId);
+    if (control.desiredState === 'running'
+      && (governance.status !== 'active' || control.governanceVersion !== governance.version)) {
+      return this.#requestStop({ actorUserId: null, agentId: control.agentId,
+        requestId: randomUUID(),
+        expectedGeneration: control.generation,
+        reason: governance.status === 'active' ? 'governance_version_changed' : `account_${governance.status}` }, 'governance_stop');
+    }
+    return null;
+  }
+
   requestStop(input) {
     return this.#withAgentLock(input.agentId, () => this.#requestStop(input, 'stop'));
   }
@@ -115,45 +150,51 @@ export class MemoryRuntimeControlStore {
     return clone(rows);
   }
 
-  async completeCommand({ workerId, commandId, status, errorCode = null }) {
+  async completeCommand({ workerId, commandId, leaseAttempt, status, errorCode = null }) {
     if (!['succeeded', 'failed', 'dead'].includes(status)) throw new RuntimeControlError('runtime_completion_invalid');
     const row = this.commands.find((item) => item.id === commandId && item.status === 'leased' && item.leasedBy === workerId);
     if (!row) return false;
-    const now = this.clock();
-    row.status = status === 'failed' ? 'queued' : status;
-    row.availableAt = status === 'failed' ? now + Math.min(30_000, 250 * (2 ** row.attempts)) : row.availableAt;
-    row.leasedBy = null;
-    row.leaseUntil = null;
-    row.lastError = errorCode;
-    row.updatedAt = now;
-    return true;
+    return this.#withAgentLock(row.aggregateId, () => {
+      if (row.status !== 'leased' || row.leasedBy !== workerId || row.attempts !== leaseAttempt || row.leaseUntil <= this.clock()) return false;
+      const control = this.controls.get(row.aggregateId);
+      if (status === 'dead' && row.eventType === 'runtime.start.requested'
+        && control.desiredState === 'running' && control.activeRunId === row.payload.runId) {
+        this.#requestStop({ actorUserId: null, agentId: row.aggregateId, requestId: randomUUID(),
+          expectedGeneration: control.generation, reason: 'start_attempts_exhausted' }, 'recovery_stop');
+      }
+      const now = this.clock();
+      row.status = status === 'failed' ? 'queued' : status;
+      row.availableAt = status === 'failed' ? now + Math.min(30_000, 250 * (2 ** row.attempts)) : row.availableAt;
+      row.leasedBy = null;
+      row.leaseUntil = null;
+      row.lastError = errorCode;
+      row.updatedAt = now;
+      return true;
+    });
   }
 
   async reconcileGovernance({ limit = 10 } = {}) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new RuntimeControlError('runtime_reconcile_invalid');
     const targets = [...this.controls.values()]
       .filter((control) => control.desiredState === 'running'
-        && ['suspended', 'banned'].includes(this.#governance(control.ownerUserId).status))
+        && (this.#governance(control.ownerUserId).status !== 'active'
+          || this.#governance(control.ownerUserId).version !== control.governanceVersion))
       .sort((left, right) => left.ownerUserId.localeCompare(right.ownerUserId) || left.agentId.localeCompare(right.agentId))
       .slice(0, limit);
     let stopped = 0;
     for (const control of targets) {
-      const governance = this.#governance(control.ownerUserId);
-      const requestId = governanceRequestId(control.ownerUserId, governance.version, control.agentId);
-      const result = await this.#withAgentLock(control.agentId, () => this.#requestStop({
-        actorUserId: null,
-        agentId: control.agentId,
-        requestId,
-        expectedGeneration: this.controls.get(control.agentId).generation,
-        reason: `account_${governance.status}`,
-      }, 'governance_stop'));
-      if (result.result === 'accepted') stopped += 1;
+      const result = await this.#withAgentLock(control.agentId, () => this.#coordinateControl(control));
+      if (result?.result === 'accepted') stopped += 1;
     }
     return { stopped, started: 0 };
   }
 
   #governance(userId) {
-    return this.governance.get(userId) ?? { userId, status: 'active', version: 0 };
+    const value = this.governance.has(userId) ? this.governance.get(userId) : { userId, status: 'active', version: 0 };
+    if (!value || !['active', 'suspended', 'banned'].includes(value.status) || !Number.isSafeInteger(value.version)) {
+      throw new RuntimeControlError('governance_unavailable');
+    }
+    return value;
   }
 
   #agentForActor(agentId, actorUserId, allowSystem = false) {
@@ -224,6 +265,9 @@ export class MemoryRuntimeControlStore {
     if (this.#governance(agent.ownerUserId).status !== 'active') throw new RuntimeControlError('account_runtime_forbidden');
 
     const current = this.#currentControl(agent);
+    if (current?.desiredState === 'running' && current.governanceVersion !== this.#governance(agent.ownerUserId).version) {
+      throw new RuntimeControlError('account_runtime_forbidden');
+    }
     const currentGeneration = current?.generation ?? 0;
     if (!Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration !== currentGeneration) {
       throw new RuntimeControlError('runtime_generation_conflict');
@@ -252,6 +296,7 @@ export class MemoryRuntimeControlStore {
       generation,
       activeRunId: runId,
       resourceSpec: normalizedResources,
+      governanceVersion: this.#governance(agent.ownerUserId).version,
       lastRequestId: input.requestId,
       changedBy: input.actorUserId,
       changeReason: 'start',
@@ -292,7 +337,7 @@ export class MemoryRuntimeControlStore {
   }
 
   #requestStop(input, action) {
-    const system = action === 'governance_stop';
+    const system = action === 'governance_stop' || action === 'recovery_stop';
     const agent = this.#agentForActor(input.agentId, input.actorUserId, system);
     const reason = cleanReason(input.reason);
     const hash = requestHash({ action, agentId: agent.id, expectedGeneration: input.expectedGeneration, reason });
@@ -342,22 +387,22 @@ export class MemoryRuntimeControlStore {
   }
 
   #commitStarted(input) {
+    this.#receipt(input, 'runtime.start.requested');
     const run = this.runs.get(input.runId);
     if (!run || run.agentId !== input.agentId || run.runGeneration !== input.runGeneration) {
       throw new RuntimeControlError('runtime_run_not_found');
     }
     const control = this.controls.get(input.agentId);
-    const governance = this.#governance(control.ownerUserId);
-    if (governance.status !== 'active' && control.desiredState === 'running') {
-      const requestId = governanceRequestId(control.ownerUserId, governance.version, control.agentId);
-      this.#requestStop({ actorUserId: null, agentId: control.agentId, requestId, expectedGeneration: control.generation, reason: `account_${governance.status}` }, 'governance_stop');
-    }
+    this.#coordinateControl(control);
     const now = new Date(this.clock()).toISOString();
     const current = control.desiredState === 'running'
       && control.generation === run.runGeneration
       && control.activeRunId === run.id
       && this.#governance(control.ownerUserId).status === 'active';
     if (current) {
+      if (run.status === 'running' && (run.containerRef !== input.orchestratorRef || run.runtimeUrl !== input.runtimeUrl)) {
+        throw new RuntimeControlError('orchestrator_identity_conflict');
+      }
       run.status = 'running';
       run.containerRef = input.orchestratorRef;
       run.runtimeUrl = input.runtimeUrl;
@@ -383,7 +428,7 @@ export class MemoryRuntimeControlStore {
       run.stopReason ??= 'stale_start';
       run.stopRequestedAt ??= now;
       run.updatedAt = now;
-      this.routes.delete(run.agentId);
+      if (this.routes.get(run.agentId)?.routeVersion === run.runGeneration) this.routes.delete(run.agentId);
       this.#ensureCompensatingStop(run, control);
     }
     return { result: 'stale_stop_enqueued', generation: control.generation, runId: run.id };
@@ -405,6 +450,7 @@ export class MemoryRuntimeControlStore {
   }
 
   #commitStopped(input) {
+    this.#receipt(input, 'runtime.stop.requested');
     const run = this.runs.get(input.runId);
     if (!run || run.agentId !== input.agentId || run.runGeneration !== input.runGeneration) {
       throw new RuntimeControlError('runtime_run_not_found');

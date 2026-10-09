@@ -35,13 +35,13 @@ function remoteOptions(overrides = {}) {
   };
 }
 
-function signedJson(body, requestId, status = 200) {
+function signedJson(body, { requestId, nonce }, status = 200) {
   const raw = JSON.stringify(body);
   return new Response(raw, {
     status,
     headers: {
       'content-type': 'application/json',
-      ...signControlResponse({ status, requestId, body: raw, keyId: 'primary', secret: CONTROL_SECRET }),
+      ...signControlResponse({ status, requestId, requestNonce: nonce, body: raw, keyId: 'primary', secret: CONTROL_SECRET }),
     },
   });
 }
@@ -67,6 +67,7 @@ test('local driver：默认可用；未登记实例 stop/route 安全返回', as
 test('remote driver：未配编排器不可用', async () => {
   const driver = new RemoteRuntimeDriver({ env: {} });
   assert.equal(driver.canRun().ok, false);
+  assert.equal(driver.instances, undefined, 'remote control must not inherit an in-memory instance registry');
   assert.match(driver.canRun().reason, /配置不完整/);
   await assert.rejects(() => driver.provision({ agentId: 'agent-1' }), /remote_driver_unavailable/);
 });
@@ -88,12 +89,12 @@ test('remote driver：签名调用固定 v1 接口且不转发 env', async () =>
       });
       requested.push({ method: options.method, path: target.pathname, body: raw ? JSON.parse(raw) : null, redirect: options.redirect });
       if (options.method === 'PUT') {
-        return signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'running', orchestratorRef: 'inst-1', runtimeUrl: 'http://agent-1.runtime.internal:8092', observedAt: '2026-10-08T00:00:00.000Z' }, verified.requestId);
+        return signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'running', orchestratorRef: 'inst-1', runtimeUrl: 'http://agent-1.runtime.internal:8092', observedAt: '2026-10-08T00:00:00.000Z' }, verified);
       }
       if (options.method === 'GET') {
-        return signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'running', orchestratorRef: 'inst-1', runtimeUrl: 'http://agent-1.runtime.internal:8092', observedAt: '2026-10-08T00:00:01.000Z' }, verified.requestId);
+        return signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'running', orchestratorRef: 'inst-1', runtimeUrl: 'http://agent-1.runtime.internal:8092', observedAt: '2026-10-08T00:00:01.000Z' }, verified);
       }
-      return signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'absent', confirmedAt: '2026-10-08T00:00:02.000Z' }, verified.requestId);
+      return signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'absent', confirmedAt: '2026-10-08T00:00:02.000Z' }, verified);
     },
   }));
 
@@ -112,11 +113,11 @@ test('remote driver：签名调用固定 v1 接口且不转发 env', async () =>
 
 test('remote driver：普通 404、未签名响应和身份错配都不能确认停止', async () => {
   const spec = { agentId: 'agent-1', runId: 'run-1', runGeneration: 1, fenceGeneration: 2, requestId: STOP_REQUEST_ID, reason: 'stop' };
-  const notFound = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async () => signedJson({ error: 'not_found' }, STOP_REQUEST_ID, 404) }));
+  const notFound = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async (_url, options) => signedJson({ error: 'not_found' }, { requestId: STOP_REQUEST_ID, nonce: options.headers['x-bairui-control-nonce'] }, 404) }));
   await assert.rejects(() => notFound.stop(spec), /stop_not_confirmed/);
   const unsigned = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }) }));
   await assert.rejects(() => unsigned.stop(spec), /control_version_invalid/);
-  const mismatched = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async () => signedJson({ agentId: 'agent-2', runId: 'run-1', runGeneration: 1, status: 'stopped', confirmedAt: '2026-10-08T00:00:00.000Z' }, STOP_REQUEST_ID) }));
+  const mismatched = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async (_url, options) => signedJson({ agentId: 'agent-2', runId: 'run-1', runGeneration: 1, status: 'stopped', confirmedAt: '2026-10-08T00:00:00.000Z' }, { requestId: STOP_REQUEST_ID, nonce: options.headers['x-bairui-control-nonce'] }) }));
   await assert.rejects(() => mismatched.stop(spec), /orchestrator_identity_mismatch/);
 });
 
@@ -126,10 +127,10 @@ test('remote driver：结果未知、超限响应和非 allowlist runtime URL �
   await assert.rejects(() => unavailable.provision(startSpec), /orchestrator_result_unknown/);
 
   const oversizedBody = JSON.stringify({ padding: 'x'.repeat(70_000) });
-  const oversized = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async () => new Response(oversizedBody, { status: 200, headers: { 'content-type': 'application/json', ...signControlResponse({ status: 200, requestId: START_REQUEST_ID, body: oversizedBody, keyId: 'primary', secret: CONTROL_SECRET }) } }) }));
+  const oversized = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async () => new Response(oversizedBody, { status: 200, headers: { 'content-type': 'application/json' } }) }));
   await assert.rejects(() => oversized.provision(startSpec), /orchestrator_response_too_large/);
 
-  const unsafe = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async () => signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'running', orchestratorRef: 'inst-1', runtimeUrl: 'http://evil.example:8092', observedAt: '2026-10-08T00:00:00.000Z' }, START_REQUEST_ID) }));
+  const unsafe = new RemoteRuntimeDriver(remoteOptions({ fetchImpl: async (_url, options) => signedJson({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'running', orchestratorRef: 'inst-1', runtimeUrl: 'http://evil.example:8092', observedAt: '2026-10-08T00:00:00.000Z' }, { requestId: START_REQUEST_ID, nonce: options.headers['x-bairui-control-nonce'] }) }));
   await assert.rejects(() => unsafe.provision(startSpec), /runtime_url_forbidden/);
 });
 
@@ -148,4 +149,15 @@ test('remote driver：inspect 在网络调用前拒绝无效运行身份', async
     /runtime_identity_invalid/,
   );
   assert.equal(called, false);
+});
+
+test('remote driver: deadline includes a body that never finishes', async () => {
+  const driver = new RemoteRuntimeDriver(remoteOptions({ requestTimeoutMs: 100,
+    fetchImpl: async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); } }), { headers: { 'content-type': 'application/json' } }),
+  }));
+  const attempt = driver.provision({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, engine: 'pi', requestId: START_REQUEST_ID, resourceSpec: RESOURCE_SPEC });
+  let watchdog;
+  try {
+    await assert.rejects(() => Promise.race([attempt, new Promise((_, reject) => { watchdog = setTimeout(() => reject(new Error('body_deadline_not_enforced')), 600); })]), /orchestrator_result_unknown/);
+  } finally { clearTimeout(watchdog); }
 });

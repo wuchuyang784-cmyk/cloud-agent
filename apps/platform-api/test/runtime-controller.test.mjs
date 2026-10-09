@@ -2,12 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { MemoryRuntimeControlStore } from '../src/runtime/control-store.mjs';
-import { RuntimeController } from '../src/runtime/controller.mjs';
+import { RuntimeController, safeRuntimeErrorCode } from '../src/runtime/controller.mjs';
 import { RemoteRuntimeDriver } from '../src/runtime/orchestration/remote-driver.mjs';
 import { FakeRuntimeOrchestrator } from './helpers/fake-runtime-orchestrator.mjs';
 
 const secret = 'runtime-controller-test-secret-at-least-32-characters';
 const resourceSpec = Object.freeze({ cpuMillis: 500, memoryBytes: 536870912, pidsLimit: 64, idleTtlSeconds: 900 });
+
+test('controller error persistence only accepts known enum codes', () => {
+  assert.equal(safeRuntimeErrorCode({ code: 'secret-that-looks-like-a-code' }), 'runtime_control_error');
+  assert.equal(safeRuntimeErrorCode({ code: 'stop_not_confirmed' }), 'stop_not_confirmed');
+});
 
 function createStore() {
   let id = 0;
@@ -36,8 +41,8 @@ async function fixture(t, options = {}) {
     allowedRuntimeHosts: ['agent-1.runtime.internal'],
     allowInsecureHttp: true,
   });
-  const controller = new RuntimeController({ store, driver, workerId: 'controller-1', maxAttempts: options.maxAttempts ?? 3 });
-  return { orchestrator, store, advance, controller };
+  const controller = new RuntimeController({ store, driver, workerId: 'controller-1', batchSize: options.batchSize ?? 10, maxAttempts: options.maxAttempts ?? 3 });
+  return { orchestrator, store, advance, controller, driver };
 }
 
 async function requestStart(store, requestId = '00000000-0000-4000-8000-000000000101', expectedGeneration = 0) {
@@ -85,7 +90,7 @@ test('runtime controller: unknown start and stop results reconcile through inspe
   assert.equal(store.control('agent-1').activeRunId, null);
 });
 
-test('runtime controller: stop racing an in-flight start never publishes the stale route', async (t) => {
+test('runtime controller: stop superseding a queued start never publishes the stale route', async (t) => {
   const { store, controller } = await fixture(t);
   const started = await requestStart(store);
   await store.requestStop({ actorUserId: 'user-1', agentId: 'agent-1', requestId: '00000000-0000-4000-8000-000000000104', expectedGeneration: 1, reason: 'race stop' });
@@ -93,6 +98,40 @@ test('runtime controller: stop racing an in-flight start never publishes the sta
   assert.equal(summary.claimed, 2);
   assert.equal(store.route('agent-1'), null);
   assert.equal(store.run(started.runId).status, 'stopped');
+  assert.equal(store.control('agent-1').activeRunId, null);
+});
+
+test('runtime controller: stop tombstone rejects an already in-flight delayed PUT', async (t) => {
+  const { orchestrator, store, controller, driver } = await fixture(t, { batchSize: 1 });
+  const started = await requestStart(store);
+  const held = orchestrator.holdNext('PUT');
+  t.after(() => held.release());
+  const inFlight = controller.tick();
+  await held.arrived;
+  try {
+    await store.requestStop({ actorUserId: 'user-1', agentId: 'agent-1', requestId: '00000000-0000-4000-8000-000000000106', expectedGeneration: 1, reason: 'race stop' });
+    const second = new RuntimeController({ store, driver, workerId: 'controller-2', batchSize: 1 });
+    assert.equal((await second.tick()).succeeded, 1);
+  } finally { held.release(); }
+  await inFlight;
+  assert.notEqual(orchestrator.run(started.runId)?.status, 'running');
+  assert.equal(store.run(started.runId).status, 'stopped');
+  assert.equal(store.route('agent-1'), null);
+});
+
+test('runtime controller: unknown exhausted START atomically fences and queues cleanup', async (t) => {
+  const { orchestrator, store, controller } = await fixture(t, { maxAttempts: 1, batchSize: 1 });
+  const started = await requestStart(store);
+  orchestrator.dropNext('PUT');
+  orchestrator.failNext('GET');
+  assert.equal((await controller.tick()).dead, 1);
+  assert.equal(orchestrator.run(started.runId).status, 'running');
+  assert.equal(store.control('agent-1').desiredState, 'stopped');
+  assert.equal(store.control('agent-1').generation, 2);
+  assert.equal(store.run(started.runId).status, 'stopping');
+  assert.equal(store.commandsFor('agent-1').filter(row => row.eventType === 'runtime.stop.requested').length, 1);
+  await controller.tick();
+  assert.equal(orchestrator.run(started.runId).status, 'stopped');
   assert.equal(store.control('agent-1').activeRunId, null);
 });
 

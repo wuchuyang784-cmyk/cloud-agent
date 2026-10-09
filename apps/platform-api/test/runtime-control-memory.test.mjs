@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 
 import { MemoryRuntimeControlStore, RuntimeControlError } from '../src/runtime/control-store.mjs';
 
@@ -49,6 +50,9 @@ async function start(store, overrides = {}) {
 }
 
 async function commitStart(store, result, overrides = {}) {
+  const pending = store.commandsFor('agent-1').find(row => row.requestId === result.commandRequestId);
+  if (pending.status === 'queued') await store.claimCommands('controller-1', 10);
+  const command = store.commandsFor('agent-1').find(row => row.requestId === result.commandRequestId);
   return store.commitStarted({
     workerId: 'controller-1',
     requestId: result.commandRequestId,
@@ -57,6 +61,7 @@ async function commitStart(store, result, overrides = {}) {
     runGeneration: result.generation,
     orchestratorRef: `ref-${result.runId}`,
     runtimeUrl: `http://${result.runId}.runtime.internal:8092`,
+    leaseAttempt: command.attempts,
     ...overrides,
   });
 }
@@ -69,7 +74,7 @@ test('memory runtime control: start creates one fenced run and one runtime comma
   });
   assert.deepEqual(store.control('agent-1'), {
     agentId: 'agent-1', organizationId: 'org-1', ownerUserId: 'user-1', desiredState: 'running',
-    generation: 1, activeRunId: 'generated-1', resourceSpec, lastRequestId: ids.start1,
+    generation: 1, activeRunId: 'generated-1', governanceVersion: 0, resourceSpec, lastRequestId: ids.start1,
     changedBy: 'user-1', changeReason: 'start', createdAt: '2026-10-08T00:00:00.000Z', updatedAt: '2026-10-08T00:00:00.000Z',
   });
   assert.equal(store.run(result.runId).status, 'initializing');
@@ -141,9 +146,11 @@ test('memory runtime control: only a confirmed stop clears the matching active r
   await commitStart(store, first);
   const stop = await store.requestStop({ actorUserId: 'user-1', agentId: 'agent-1', requestId: ids.stop1, expectedGeneration: 1, reason: 'rotate' });
   assert.equal(store.control('agent-1').activeRunId, first.runId);
+  await store.claimCommands('controller-1', 10);
   await store.commitStopped({
     workerId: 'controller-1', requestId: stop.commandRequestId, agentId: 'agent-1', runId: first.runId,
     runGeneration: 1, fenceGeneration: 2, status: 'stopped', confirmedAt: '2026-10-08T00:00:01.000Z',
+    leaseAttempt: 1,
   });
   assert.equal(store.control('agent-1').activeRunId, null);
   const second = await start(store, { requestId: ids.start2, expectedGeneration: 2 });
@@ -152,6 +159,7 @@ test('memory runtime control: only a confirmed stop clears the matching active r
   await store.commitStopped({
     workerId: 'controller-1', requestId: stop.commandRequestId, agentId: 'agent-1', runId: first.runId,
     runGeneration: 1, fenceGeneration: 2, status: 'absent', confirmedAt: '2026-10-08T00:00:02.000Z',
+    leaseAttempt: 1,
   });
   assert.equal(store.control('agent-1').activeRunId, second.runId);
   assert.equal(store.route('agent-1').runId, second.runId);
@@ -198,6 +206,55 @@ test('memory runtime control: leases recover and completion requires the owning 
   const [recovered] = await store.claimCommands('controller-2', 10);
   assert.equal(recovered.id, leased.id);
   assert.equal(recovered.attempts, 2);
-  assert.equal(await store.completeCommand({ workerId: 'controller-2', commandId: leased.id, status: 'succeeded' }), true);
+  assert.equal(await store.completeCommand({ workerId: 'controller-2', commandId: leased.id, leaseAttempt: recovered.attempts, status: 'succeeded' }), true);
   assert.equal(store.commandsFor('agent-1')[0].status, 'succeeded');
+});
+
+test('memory runtime control: pause then restore before reconcile fences the original run', async () => {
+  const { store } = createStore();
+  const first = await start(store);
+  await commitStart(store, first);
+  store.setGovernance('user-1', 'suspended', 1);
+  store.setGovernance('user-1', 'active', 2);
+  assert.equal((await store.reconcileGovernance({ limit: 10 })).stopped, 1);
+  assert.equal(store.route('agent-1'), null);
+  assert.equal(store.control('agent-1').desiredState, 'stopped');
+});
+
+test('memory governance commands cannot collide with a caller-chosen start request UUID', async () => {
+  const { store } = createStore();
+  const hex = createHash('sha256').update('user-1\n1\nagent-1').digest('hex').slice(0, 32).split('');
+  hex[12] = '5'; hex[16] = ['8', '9', 'a', 'b'][Number.parseInt(hex[16], 16) % 4];
+  const requestId = `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
+  const first = await start(store, { requestId });
+  await commitStart(store, first);
+  store.setGovernance('user-1', 'banned', 1);
+  assert.equal((await store.reconcileGovernance({ limit: 10 })).stopped, 1);
+  assert.equal(store.route('agent-1'), null);
+  const stop = store.commandsFor('agent-1').find(row => row.eventType === 'runtime.stop.requested');
+  assert.ok(stop);
+  assert.notEqual(stop.requestId, requestId);
+  assert.equal((await store.reconcileGovernance({ limit: 10 })).stopped, 0);
+});
+
+test('memory runtime control: expired receipt and same-worker recovered lease cannot mutate state', async () => {
+  const { store, advance } = createStore();
+  const first = await start(store);
+  const [command] = await store.claimCommands('controller-1', 10);
+  advance(60_001);
+  await store.claimCommands('controller-1', 10);
+  const input = { workerId: 'controller-1', requestId: command.requestId, agentId: 'agent-1', runId: first.runId,
+    runGeneration: 1, orchestratorRef: 'ref', runtimeUrl: 'http://runtime.internal:8092', leaseAttempt: 1 };
+  await assert.rejects(() => store.commitStarted(input), { code: 'runtime_command_lease_lost' });
+  assert.equal(await store.completeCommand({ workerId: 'controller-1', commandId: command.id, leaseAttempt: 1, status: 'succeeded' }), false);
+  assert.equal(store.route('agent-1'), null);
+});
+
+test('memory runtime control: stale queued start is skipped before an external side effect', async () => {
+  const { store } = createStore();
+  await start(store);
+  await store.requestStop({ actorUserId: 'user-1', agentId: 'agent-1', requestId: ids.stop1, expectedGeneration: 1, reason: 'stop' });
+  const commands = await store.claimCommands('controller-1', 10);
+  const command = commands.find(row => row.eventType === 'runtime.start.requested');
+  assert.deepEqual(await store.prepareCommand({ workerId: 'controller-1', requestId: command.requestId, leaseAttempt: command.attempts }), { eligible: false, reason: 'superseded' });
 });

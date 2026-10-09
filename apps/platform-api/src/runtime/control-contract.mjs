@@ -34,10 +34,15 @@ function assertRuntimeIdentity(value) {
 }
 
 function assertMatchingIdentity(value, expected) {
+  assertRuntimeIdentity(expected);
   if (!isRecord(value)
     || value.agentId !== expected?.agentId
     || value.runId !== expected?.runId
     || value.runGeneration !== expected?.runGeneration) throw new Error('orchestrator_identity_mismatch');
+}
+
+function identity(value) {
+  return { agentId: value.agentId, runId: value.runId, runGeneration: value.runGeneration, status: value.status };
 }
 
 function validRuntimeLocation(value) {
@@ -94,14 +99,14 @@ export function parseStartConfirmation(value, expected) {
     || !validOrchestratorRef(value.orchestratorRef)
     || !validRuntimeLocation(value.runtimeUrl)
     || !validIsoTimestamp(value.observedAt)) throw new Error('orchestrator_bad_response');
-  return { ...value };
+  return { ...identity(value), orchestratorRef: value.orchestratorRef, runtimeUrl: value.runtimeUrl, observedAt: value.observedAt };
 }
 
 export function parseStopConfirmation(value, expected) {
   assertMatchingIdentity(value, expected);
   if (!['stopped', 'absent'].includes(value.status)
     || !validIsoTimestamp(value.confirmedAt)) throw new Error('orchestrator_bad_response');
-  return { ...value };
+  return { ...identity(value), confirmedAt: value.confirmedAt };
 }
 
 export function parseInspection(value, expected) {
@@ -112,5 +117,6 @@ export function parseInspection(value, expected) {
       && (!validOrchestratorRef(value.orchestratorRef) || !validRuntimeLocation(value.runtimeUrl)))) {
     throw new Error('orchestrator_bad_response');
   }
-  return { ...value };
+  return { ...identity(value), observedAt: value.observedAt,
+    ...(value.status === 'running' ? { orchestratorRef: value.orchestratorRef, runtimeUrl: value.runtimeUrl } : {}) };
 }

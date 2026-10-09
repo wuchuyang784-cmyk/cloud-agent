@@ -89,7 +89,7 @@ function header(headers, name) {
 }
 
 function keyFor(keys, keyId) {
-  const secret = keys instanceof Map ? keys.get(keyId) : keys?.[keyId];
+  const secret = keys instanceof Map ? keys.get(keyId) : (Object.hasOwn(keys ?? {}, keyId) ? keys[keyId] : undefined);
   if (secret === undefined) throw new ControlEnvelopeError('control_key_unknown');
   return secret;
 }
@@ -117,11 +117,13 @@ function responseMetadata(headers) {
     version: header(headers, 'x-bairui-control-version'),
     keyId: header(headers, 'x-bairui-control-key-id'),
     requestId: header(headers, 'x-bairui-control-request-id'),
+    requestNonce: header(headers, 'x-bairui-control-request-nonce'),
     signature: header(headers, 'x-bairui-control-response-signature'),
   };
   if (metadata.version !== VERSION) throw new ControlEnvelopeError('control_version_invalid');
   validateKeyId(metadata.keyId);
   validateRequestId(metadata.requestId);
+  if (!NONCE_PATTERN.test(String(metadata.requestNonce ?? ''))) throw new ControlEnvelopeError('control_nonce_invalid');
   if (!HEX_SHA256_PATTERN.test(String(metadata.signature ?? ''))) throw new ControlEnvelopeError('control_signature_invalid');
   return metadata;
 }
@@ -130,8 +132,8 @@ export function canonicalControlRequest({ version = VERSION, method, path, times
   return [version, String(method).toUpperCase(), path, String(timestamp), nonce, requestId, sha256(body)].join('\n');
 }
 
-export function canonicalControlResponse({ version = VERSION, status, requestId, body }) {
-  return [version, String(status), requestId, sha256(body)].join('\n');
+export function canonicalControlResponse({ version = VERSION, status, requestId, requestNonce, body }) {
+  return [version, String(status), requestId, requestNonce, sha256(body)].join('\n');
 }
 
 export function signControlRequest({ method, path, body = '', requestId, keyId, secret, now = Date.now(), nonce = randomUUID() }) {
@@ -169,32 +171,35 @@ export function verifyControlRequest({ method, path, body = '', headers, keys, n
     timestamp: metadata.timestamp,
     nonce: metadata.nonce,
   }), metadata.signature);
-  if (!nonceStore?.consume || !nonceStore.consume(metadata.keyId, metadata.nonce, timestamp + NONCE_RETENTION_MS, now)) {
+  if (!nonceStore?.consume || nonceStore.consume(metadata.keyId, metadata.nonce, timestamp + NONCE_RETENTION_MS, now) !== true) {
     throw new ControlEnvelopeError(nonceStore?.consume ? 'control_nonce_replayed' : 'control_nonce_store_invalid');
   }
   return metadata;
 }
 
-export function signControlResponse({ status, requestId, body = '', keyId, secret }) {
+export function signControlResponse({ status, requestId, requestNonce, body = '', keyId, secret }) {
   validateSecret(secret);
   validateKeyId(keyId);
   validateRequestId(requestId);
+  if (!NONCE_PATTERN.test(String(requestNonce ?? ''))) throw new ControlEnvelopeError('control_nonce_invalid');
   if (!Number.isSafeInteger(status) || status < 100 || status > 599) throw new ControlEnvelopeError('control_status_invalid');
-  const signature = hmac(secret, canonicalControlResponse({ status, requestId, body }));
+  const signature = hmac(secret, canonicalControlResponse({ status, requestId, requestNonce, body }));
   return {
     'x-bairui-control-version': VERSION,
     'x-bairui-control-key-id': keyId,
     'x-bairui-control-request-id': requestId,
+    'x-bairui-control-request-nonce': requestNonce,
     'x-bairui-control-response-signature': signature,
   };
 }
 
-export function verifyControlResponse({ status, requestId, body = '', headers, keys }) {
+export function verifyControlResponse({ status, requestId, requestNonce, body = '', headers, keys }) {
   validateRequestId(requestId);
+  if (!NONCE_PATTERN.test(String(requestNonce ?? ''))) throw new ControlEnvelopeError('control_nonce_invalid');
   if (!Number.isSafeInteger(status) || status < 100 || status > 599) throw new ControlEnvelopeError('control_status_invalid');
   const metadata = responseMetadata(headers);
-  if (metadata.requestId !== requestId) throw new ControlEnvelopeError('control_response_mismatch');
+  if (metadata.requestId !== requestId || metadata.requestNonce !== requestNonce) throw new ControlEnvelopeError('control_response_mismatch');
   const secret = keyFor(keys, metadata.keyId);
-  verifyMac(secret, canonicalControlResponse({ status, requestId, body }), metadata.signature);
+  verifyMac(secret, canonicalControlResponse({ status, requestId, requestNonce, body }), metadata.signature);
   return metadata;
 }

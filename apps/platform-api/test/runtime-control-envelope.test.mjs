@@ -91,15 +91,15 @@ test('runtime control envelope: key ids support rotation and unknown keys fail c
 
 test('runtime control envelope: response signature binds status, request id and body', () => {
   const responseBody = JSON.stringify({ agentId: 'agent-1', runId: 'run-1', runGeneration: 1, status: 'running' });
-  const headers = signControlResponse({ status: 200, requestId, body: responseBody, keyId: 'primary', secret });
-  assert.equal(verifyControlResponse({ status: 200, requestId, body: responseBody, headers, keys: { primary: secret } }).keyId, 'primary');
+  const headers = signControlResponse({ status: 200, requestId, requestNonce: 'nonce-1', body: responseBody, keyId: 'primary', secret });
+  assert.equal(verifyControlResponse({ status: 200, requestId, requestNonce: 'nonce-1', body: responseBody, headers, keys: { primary: secret } }).keyId, 'primary');
   for (const changed of [
     { status: 202 },
     { requestId: '00000000-0000-4000-8000-000000000002' },
     { body: responseBody + ' ' },
   ]) {
     assert.throws(
-      () => verifyControlResponse({ status: 200, requestId, body: responseBody, headers, keys: { primary: secret }, ...changed }),
+      () => verifyControlResponse({ status: 200, requestId, requestNonce: 'nonce-1', body: responseBody, headers, keys: { primary: secret }, ...changed }),
       (error) => error instanceof ControlEnvelopeError
         && ['control_response_mismatch', 'control_signature_invalid'].includes(error.code),
     );
@@ -112,4 +112,13 @@ test('runtime control envelope: weak secrets and malformed metadata are rejected
   assert.throws(() => verifyRequest({ ...headers, 'x-bairui-control-version': 'v2' }), { message: 'control_version_invalid' });
   assert.throws(() => verifyRequest({ ...headers, 'x-bairui-control-request-id': 'not-a-uuid' }), { message: 'control_request_id_invalid' });
   assert.throws(() => verifyRequest({ ...headers, 'x-bairui-control-signature': 'not-hex' }), { message: 'control_signature_invalid' });
+});
+
+test('response from an earlier retry cannot confirm a later request with the same requestId', () => {
+  const headers = signControlResponse({ status: 200, requestId, requestNonce: 'first-attempt', body, keyId: 'primary', secret });
+  assert.throws(() => verifyControlResponse({ status: 200, requestId, requestNonce: 'second-attempt', body, headers, keys: { primary: secret } }), /control_response_mismatch/);
+});
+
+test('nonce consumption requires an explicit true result, not a pending Promise', () => {
+  assert.throws(() => verifyRequest(signedRequest(), { nonceStore: { consume: () => Promise.resolve(false) } }), /control_nonce_replayed/);
 });

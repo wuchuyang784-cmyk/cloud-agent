@@ -1,5 +1,6 @@
 import { RuntimeControlError } from './control-store.mjs';
 import { normalizeResourceSpec } from './control-contract.mjs';
+import { rollbackForRelease } from '../postgres-transaction.mjs';
 
 const DATABASE_ERROR_CODES = Object.freeze({
   '22023': 'runtime_control_invalid',
@@ -41,7 +42,7 @@ function commandFromRow(row) {
 
 export class PostgresRuntimeControlStore {
   constructor({ pool }) {
-    if (!pool?.query) throw new TypeError('runtime_control_pool_required');
+    if (!pool?.connect) throw new TypeError('runtime_control_pool_required');
     this.pool = pool;
   }
 
@@ -69,20 +70,24 @@ export class PostgresRuntimeControlStore {
     ]);
   }
 
+  prepareCommand({ workerId, requestId, leaseAttempt }) {
+    return this.#json('runtime_control_prepare', [workerId, requestId, leaseAttempt]);
+  }
+
   async claimCommands(workerId, limit = 10) {
     try {
-      const result = await this.pool.query('SELECT * FROM runtime_control_claim($1,$2)', [workerId, limit]);
+      const result = await this.#query('SELECT * FROM runtime_control_claim($1,$2)', [workerId, limit]);
       return result.rows.map(commandFromRow);
     } catch (error) {
       throw new RuntimeControlError(safeDatabaseCode(error));
     }
   }
 
-  async completeCommand({ workerId, commandId, status, errorCode = null }) {
+  async completeCommand({ workerId, commandId, leaseAttempt, status, errorCode = null }) {
     try {
-      const result = await this.pool.query(
-        'SELECT runtime_control_complete($1,$2,$3,$4) AS ok',
-        [workerId, commandId, status, errorCode],
+      const result = await this.#query(
+        'SELECT runtime_control_complete($1,$2,$3,$4,$5) AS ok',
+        [workerId, commandId, status, errorCode, leaseAttempt],
       );
       return result.rows[0]?.ok === true;
     } catch (error) {
@@ -99,6 +104,7 @@ export class PostgresRuntimeControlStore {
       input.runGeneration,
       input.orchestratorRef,
       input.runtimeUrl,
+      input.leaseAttempt,
     ]);
   }
 
@@ -112,6 +118,7 @@ export class PostgresRuntimeControlStore {
       input.fenceGeneration,
       input.status,
       input.confirmedAt,
+      input.leaseAttempt,
     ]);
   }
 
@@ -122,11 +129,28 @@ export class PostgresRuntimeControlStore {
   async #json(functionName, values) {
     const parameters = values.map((_, index) => `$${index + 1}`).join(',');
     try {
-      const result = await this.pool.query(`SELECT ${functionName}(${parameters}) AS result`, values);
+      const result = await this.#query(`SELECT ${functionName}(${parameters}) AS result`, values);
       return controlResult(result.rows[0]?.result);
     } catch (error) {
       if (error instanceof RuntimeControlError) throw error;
       throw new RuntimeControlError(safeDatabaseCode(error));
     }
+  }
+
+  async #query(sql, values) {
+    const client = await this.pool.connect();
+    let releaseError;
+    try {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+      await client.query("SET LOCAL statement_timeout='3s'; SET LOCAL lock_timeout='2s'");
+      const result = await client.query(sql, values);
+      // A rejected receipt must not commit any partial coordination side effects.
+      controlResult(result.rows[0]?.result);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      releaseError = await rollbackForRelease(client);
+      throw error;
+    } finally { client.release(releaseError); }
   }
 }
