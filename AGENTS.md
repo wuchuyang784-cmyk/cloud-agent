@@ -21,6 +21,16 @@
 
 ## 项目定位
 
+### E3：常驻 Controller、状态回流及告警（2026-10-10，本机隔离验收，未部署）
+
+- 独立入口 `npm run controller:isolation`，实现位于 `apps/platform-api/src/runtime/supervision/`；显式 isolation、回环专用受限 PostgreSQL、HTTPS 编排器、精确 Runtime 白名单和独立指标 token，不读业务 `.env`，不加入 dev/app，不持有 Docker 权限或安装后台系统服务。
+- 新迁移 `040_runtime_supervision.sql` 在既有 control 表增加观察租约及最近状态；Memory/PG 双实现，worker/token/run/control generation 围栏，治理共享锁和 Agent→control→run 锁序。仅匹配 signed stopped/absent 才撤路由、停止 run/control/Agent 并记录随机系统 recovery_stop 审计；错误不释放，不自动重启，running 不发布缺失路由。
+- 串行有界周期、失败后继续、退出等待在途；固定聚合指标不含身份/URL/SQL。周期失败保留上次快照，停止超过 60 秒、观察超过 60 秒不成功及仍占用 active run 的 dead 命令产生告警；真实停止后解除，历史审计保留。
+- 五类固定 Runtime 告警复用 Prometheus→Alertmanager→现有本地接收器。规则为独立 opt-in 资产，没有自动修改预发。Controller 指标固定回环监听；隔离告警测试临时使用自有 bridge 和鉴权宿主端点，后续部署需明确采集路径。
+- `test:runtime-supervision` 覆盖两池租约/迟到回执、双方向治理锁、写入失败回滚、最小权限、迁移重跑及真实受限 Controller 进程→TLS E2→Docker TTL/异常退出/治理停止→平台/指标。`test:runtime-alerts` 覆盖官方规则与真实 firing/resolved；告警故障快照为测试注入，两段分别验收，不宣称已经端到端部署。
+- E3 专项 23、E1 62、E2 34、平台模式 25、监控配置 23 项通过；后端全量 266 通过/9 数据库容器专项跳过/0 失败。官方规则 18 场景/90 断言、实链路 14 条告警/解除持久记录；真实 Controller 数据库登录断连后保留快照并恢复。Docker 专项串行执行，避免高负荷造成有界 CLI 超时与后续连带断言失败。
+- 本批仍使用固定无模型 probe，真实 pi/dsh/Provider、全局容量准入和用户执行入口保持后续独立准入；业务 bairui、bairui-postgres 和常驻预发未操作，临时资源按随机归属精确清理。说明见 `docs/47-e3-controller-supervision.md`。
+
 ### E2：实际编排器与资源回收（2026-10-09，本机隔离验收，未部署）
 
 - 独立入口 `npm run orchestrator:isolation`，实现位于 `apps/platform-api/src/runtime/orchestrator/`；仅显式 isolation + 专用 ledger PostgreSQL + TLS 回环监听，不读取业务 `.env`，不进入 dev/app 启动链，不给平台 API Docker 权限。
@@ -29,7 +39,7 @@
 - 固定本机 sha256 镜像与同安装 internal 网络，CPU/内存/PID、非 root、只读根、cap-drop/no-new-privileges，无任意 env/命令/卷/端口；启动参数不是对 Docker 管理员的沙箱。没有全局容量准入或真实工作负载挂载。
 - 独立 reaper 回收到期、异常退出和待停止容器，失败轮转不饿死后续记录；本阶段无业务活动，TTL 从首次意图起计，GET/健康检查/重试不续期。不承诺故障下释放时限，也未接平台路由/TTL 状态主动回流或生产告警。
 - `npm run test:orchestrator` 34 项全通过，含真实 cgroup/只读限制、精确删除、受限 PG、两池锁与 nonce、连接终止恢复、结果丢失、独立 HTTPS 进程强杀重启；TTL 用注入时钟后实际删除容器。E1 62、平台 25 全通过，后端 251 通过/8 数据库专项跳过/0 失败。
-- 专项仅使用一次性容器、临时库/网络/证书并按归属清理，业务 bairui 和常驻预发未操作；说明见 `docs/46-e2-isolated-orchestrator.md`。下一步为受限 Controller 常驻协调/告警及治理停止闭环，再分阶段接真实 Agent。
+- 专项仅使用一次性容器、临时库/网络/证书并按归属清理，业务 bairui 和常驻预发未操作；说明见 `docs/46-e2-isolated-orchestrator.md`。后续 Controller 常驻协调/告警及治理停止闭环见上方 E3，再分阶段接真实 Agent。
 
 ### E1：真实 Runtime 控制安全底座（2026-10-09，本机隔离验收，未部署）
 

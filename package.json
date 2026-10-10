@@ -6,6 +6,9 @@
   "scripts": {
     "test:runtime-control": "node scripts/test-runtime-control.mjs",
     "test:orchestrator": "node scripts/test-orchestrator.mjs",
+    "test:runtime-supervision": "node scripts/test-runtime-supervision.mjs",
+    "test:runtime-alerts": "node scripts/test-runtime-alerts.mjs",
+    "controller:isolation": "node apps/platform-api/src/runtime/supervision/index.mjs",
     "orchestrator:isolation": "node apps/platform-api/src/runtime/orchestrator/index.mjs",
     "test:governance": "node scripts/test-scheduler.mjs --governance",
     "test:governance:web": "node scripts/test-governance-browser.mjs",

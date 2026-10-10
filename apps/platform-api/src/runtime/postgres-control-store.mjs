@@ -126,6 +126,20 @@ export class PostgresRuntimeControlStore {
     return this.#json('runtime_control_reconcile_governance', [workerId, limit]);
   }
 
+  claimObservation(workerId) {
+    return this.#json('runtime_supervision_claim', [workerId]);
+  }
+
+  recordObservation(input) {
+    return this.#json('runtime_supervision_record', [input.workerId, input.leaseToken, input.agentId,
+      input.runId, input.runGeneration, input.controlGeneration, input.status, input.observedAt,
+      input.orchestratorRef ?? null, input.runtimeUrl ?? null]);
+  }
+
+  supervisionSnapshot() {
+    return this.#json('runtime_supervision_snapshot', []);
+  }
+
   async #json(functionName, values) {
     const parameters = values.map((_, index) => `$${index + 1}`).join(',');
     try {

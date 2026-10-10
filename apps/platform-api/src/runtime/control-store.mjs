@@ -189,6 +189,79 @@ export class MemoryRuntimeControlStore {
     return { stopped, started: 0 };
   }
 
+  async claimObservation(workerId) {
+    if (typeof workerId !== 'string' || workerId.length < 1 || workerId.length > 100 || CONTROL_CHARACTERS.test(workerId)) throw new RuntimeControlError('runtime_observation_invalid');
+    for (const candidate of [...this.controls.values()].sort((a, b) => (a.observationNextAt ?? 0) - (b.observationNextAt ?? 0))) {
+      const claimed = await this.#withAgentLock(candidate.agentId, () => {
+        const now = this.clock();
+        const c = this.controls.get(candidate.agentId); const run = this.runs.get(c.activeRunId);
+        if (!run || (c.observation?.runId === run.id && c.observation.controlGeneration === c.generation && c.observation.until > now)
+          || (c.lastObservation?.runId === run.id && c.lastObservation.controlGeneration === c.generation && c.observationNextAt > now)) return null;
+        const lease = { workerId, leaseToken: randomUUID(), agentId: c.agentId, runId: run.id,
+          runGeneration: run.runGeneration, controlGeneration: c.generation, until: now + 60000 };
+        c.observation = lease; return clone(lease);
+      });
+      if (claimed) return claimed;
+    }
+    return null;
+  }
+
+  recordObservation(input) {
+    return this.#withAgentLock(input.agentId, () => {
+      const c = this.controls.get(input.agentId); const lease = c?.observation;
+      if (!lease || lease.workerId !== input.workerId || lease.leaseToken !== input.leaseToken || lease.until <= this.clock()) {
+        throw new RuntimeControlError('runtime_observation_lease_lost');
+      }
+      if (c.activeRunId !== input.runId || c.generation !== input.controlGeneration || lease.runId !== input.runId
+        || lease.controlGeneration !== input.controlGeneration || lease.runGeneration !== input.runGeneration) throw new RuntimeControlError('runtime_observation_superseded');
+      const run = this.runs.get(input.runId);
+      if (!run || run.runGeneration !== input.runGeneration || !['starting', 'running', 'stopping', 'stopped', 'absent', 'error'].includes(input.status)
+        || !Number.isFinite(Date.parse(input.observedAt))) throw new RuntimeControlError('runtime_observation_invalid');
+      if (input.status === 'running' && run.status === 'running'
+        && (run.containerRef !== input.orchestratorRef || run.runtimeUrl !== input.runtimeUrl)) throw new RuntimeControlError('runtime_observation_identity_conflict');
+      if (input.status === 'running' && (typeof input.orchestratorRef !== 'string' || input.orchestratorRef.length < 1
+        || input.orchestratorRef.length > 500 || CONTROL_CHARACTERS.test(input.orchestratorRef)
+        || typeof input.runtimeUrl !== 'string' || input.runtimeUrl.length > 2048 || !/^https?:\/\/[^\s]+$/.test(input.runtimeUrl))) throw new RuntimeControlError('runtime_observation_invalid');
+      const governance = this.#governance(c.ownerUserId);
+      const now = this.clock(); const iso = new Date(now).toISOString();
+      const successfulAt = input.status === 'error' ? (c.lastObservation?.runId === run.id ? c.lastObservation.successfulAt : null) : now;
+      c.lastObservation = { runId: run.id, controlGeneration: c.generation, status: input.status, at: now, successfulAt };
+      c.observation = null; c.observationNextAt = now + 10000;
+      if (['stopped', 'absent'].includes(input.status)) {
+        const expectedGeneration = c.generation; const requestId = randomUUID();
+        if (c.desiredState === 'running') c.generation++;
+        Object.assign(c, { desiredState: 'stopped', activeRunId: null, changedBy: null, lastRequestId: requestId, changeReason: 'observed_terminal', updatedAt: iso });
+        Object.assign(run, { status: 'stopped', desiredState: 'stopped', stopReason: run.stopReason ?? 'observed_terminal', stopConfirmedAt: iso, stoppedAt: iso, updatedAt: iso });
+        if (this.routes.get(c.agentId)?.routeVersion === run.runGeneration) this.routes.delete(c.agentId);
+        this.agents.get(c.agentId).status = 'stopped';
+        this.#recordRequest({ requestId, requestHash: requestHash({ runId: run.id, status: input.status }), organizationId: c.organizationId,
+          agentId: c.agentId, action: 'recovery_stop', expectedGeneration,
+          result: { result: 'accepted', generation: c.generation, runId: run.id }, actorUserId: null, reason: 'observed_terminal' });
+        return { result: 'stopped' };
+      }
+      const route = this.routes.get(c.agentId);
+      if (input.status === 'running' && c.desiredState === 'running' && governance.status === 'active' && governance.version === c.governanceVersion
+        && route?.runId === run.id && route.routeVersion === run.runGeneration && run.containerRef === input.orchestratorRef && route.runtimeUrl === input.runtimeUrl) {
+        route.lastSeenAt = iso; route.updatedAt = iso;
+      }
+      return { result: 'observed' };
+    });
+  }
+
+  async supervisionSnapshot() {
+    const summary = { active: 0, stopping: 0, stopOverdue: 0, deadPending: 0, observationErrors: 0, observationStale: 0 };
+    for (const c of this.controls.values()) {
+      const run = this.runs.get(c.activeRunId); if (!run) continue;
+      summary.active++;
+      if (run.status === 'stopping') { summary.stopping++; if (this.clock() - Date.parse(run.stopRequestedAt) > 60000) summary.stopOverdue++; }
+      if (this.commands.some(q => q.status === 'dead' && q.payload.runId === run.id)) summary.deadPending++;
+      const observation = c.lastObservation?.runId === run.id ? c.lastObservation : null;
+      if (observation?.status === 'error' || (run.status === 'running' && observation && observation.status !== 'running')) summary.observationErrors++;
+      if (this.clock() - (observation?.successfulAt ?? Date.parse(run.createdAt)) > 60000) summary.observationStale++;
+    }
+    return summary;
+  }
+
   #governance(userId) {
     const value = this.governance.has(userId) ? this.governance.get(userId) : { userId, status: 'active', version: 0 };
     if (!value || !['active', 'suspended', 'banned'].includes(value.status) || !Number.isSafeInteger(value.version)) {

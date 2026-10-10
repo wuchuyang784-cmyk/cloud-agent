@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { waitForPostgres } from './postgres-ready.mjs';
 
 const exec = promisify(execFile);
+const supervision = process.argv.includes('--supervision');
+const phase = supervision ? 'E3' : 'E2';
 const { Client } = createRequire(new URL('../apps/platform-api/package.json', import.meta.url))('pg');
 const installationId = `br-e2-test-${randomBytes(6).toString('hex')}`;
 const network = `${installationId}-net`; const database = `${installationId}-db`;
@@ -19,6 +21,8 @@ for (const key of Object.keys(env)) if (/^(BAIRUI_|BETTER_AUTH_|DATABASE_URL$|PO
 const cli = async args => (await exec('docker', args, { env, windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 })).stdout.trim();
 let attemptedResources = false; let networkConfirmed = false; let databaseConfirmed = false; let certificateDirectory;
 try {
+  const context = JSON.parse(await cli(['context', 'inspect']))[0];
+  if (!/^(npipe:\/\/|unix:\/\/)/.test(context?.Endpoints?.docker?.Host ?? '') || env.DOCKER_HOST) throw new Error('local_docker_required');
   certificateDirectory = await mkdtemp(join(tmpdir(), 'bairui-e2-cert-'));
   const certFile = join(certificateDirectory, 'cert.pem'); const keyFile = join(certificateDirectory, 'key.pem');
   try {
@@ -39,6 +43,7 @@ try {
   delete env.POSTGRES_PASSWORD;
   const port = JSON.parse(await cli(['inspect', database]))[0].NetworkSettings.Ports['5432/tcp'][0].HostPort;
   const adminUrl = `postgresql://postgres:${password}@127.0.0.1:${port}/orchestrator_check`;
+  if (supervision) env.BAIRUI_RUNTIME_CONTROL_TEST_DATABASE_URL = adminUrl;
   await waitForPostgres(() => new Client({ connectionString: adminUrl, connectionTimeoutMillis: 2000, query_timeout: 2000 }));
   const admin = new Client({ connectionString: adminUrl });
   await admin.connect();
@@ -53,14 +58,17 @@ try {
   } finally { await admin.end(); }
   Object.assign(env, { BAIRUI_ORCHESTRATOR_TEST_DATABASE_URL: `postgresql://orchestrator_app:${appPassword}@127.0.0.1:${port}/orchestrator_check`,
     BAIRUI_ORCHESTRATOR_TEST_INSTALLATION: installationId, BAIRUI_ORCHESTRATOR_TEST_NETWORK: network, BAIRUI_ORCHESTRATOR_TEST_IMAGE: image });
-  console.log('E2 独立受限数据库、内部网络已就绪；使用真实 Docker 容器验收。');
+  console.log(`${phase} 独立受限数据库、内部网络已就绪；使用真实 Docker 容器验收。`);
   const files = ['orchestrator.test.mjs', 'orchestrator-docker.test.mjs', 'orchestrator-http.test.mjs', 'orchestrator-config.test.mjs', 'orchestrator-integration.test.mjs'];
+  if (supervision) {
+    files.splice(0, files.length, 'runtime-supervision.test.mjs', 'runtime-supervision-postgres.test.mjs', 'runtime-supervision-controller.test.mjs', 'runtime-telemetry.test.mjs');
+  }
   process.exitCode = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...files.map(file => `apps/platform-api/test/${file}`)],
       { env, cwd: fileURLToPath(new URL('../', import.meta.url)), stdio: 'inherit', windowsHide: true });
     child.once('error', reject); child.once('exit', code => resolve(code ?? 1));
   });
-} catch (error) { console.error('E2 隔离验收失败：', error.code ?? error.name); process.exitCode = 1; }
+} catch (error) { console.error(`${phase} 隔离验收失败：`, error.code ?? error.name); process.exitCode = 1; }
 finally {
   try {
     // Resolve exact IDs, then independently verify labels before each removal.
@@ -80,14 +88,14 @@ finally {
         await cli(['network', 'rm', id]);
       }
       if (!networkConfirmed || !databaseConfirmed) {
-        console.error('E2 资源创建未全部确认，已清理当前可见资源；迟到资源需按安装标识复核：' + installationId);
+        console.error(`${phase} 资源创建未全部确认，已清理当前可见资源；迟到资源需按安装标识复核：` + installationId);
         process.exitCode = 1;
-      } else console.log('E2 本次可见测试容器、临时数据库卷与内部网络已精确清理。');
+      } else console.log(`${phase} 本次可见测试容器、临时数据库卷与内部网络已精确清理。`);
     }
-  } catch { console.error('E2 测试资源清理失败，安装标识：' + installationId); process.exitCode = 1; }
+  } catch { console.error(`${phase} 测试资源清理失败，安装标识：` + installationId); process.exitCode = 1; }
   if (certificateDirectory) {
     if (dirname(resolve(certificateDirectory)) !== resolve(tmpdir()) || !basename(certificateDirectory).startsWith('bairui-e2-cert-')) {
-      console.error('E2 临时证书路径校验失败'); process.exitCode = 1;
+      console.error(`${phase} 临时证书路径校验失败`); process.exitCode = 1;
     } else await rm(certificateDirectory, { recursive: true, force: true });
   }
 }

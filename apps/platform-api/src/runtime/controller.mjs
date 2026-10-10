@@ -28,7 +28,8 @@ export class RuntimeController {
     Object.assign(this, { store, driver, workerId, batchSize, maxAttempts });
   }
 
-  async tick() {
+  async tick({ shouldContinue = () => true } = {}) {
+    if (!shouldContinue()) return { reconciled: 0, claimed: 0, succeeded: 0, retried: 0, dead: 0 };
     const reconciliation = await this.store.reconcileGovernance({ workerId: this.workerId, limit: this.batchSize });
     const summary = {
       reconciled: Number(reconciliation?.stopped ?? 0),
@@ -39,6 +40,7 @@ export class RuntimeController {
     };
     // Claim only when ready to execute; a slow predecessor must not consume another command's lease.
     for (let index = 0; index < this.batchSize; index += 1) {
+      if (!shouldContinue()) break;
       const [command] = await this.store.claimCommands(this.workerId, 1);
       if (!command) break;
       summary.claimed += 1;
