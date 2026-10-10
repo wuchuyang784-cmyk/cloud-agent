@@ -82,6 +82,11 @@ test('rule validation gives read-only promtool a bounded non-executable temporar
   assert.deepEqual(args.slice(args.indexOf('--cap-drop'), args.indexOf('--security-opt')), ['--cap-drop', 'ALL']);
 });
 
+test('live monitoring acceptance validates the installed optional Runtime assets', async () => {
+  const source = await fs.readFile(new URL('./test-monitoring.mjs', import.meta.url), 'utf8');
+  assert.ok(/await validateMonitoring\(state\.monitoring\.runtime\)/.test(source), 'installed_runtime_validation_required');
+});
+
 test('interrupted volume initialization retries ownership setup before marking resources ready', async t => {
   const { state, mutations } = fixture(t, { installed: false, failInitializer: true,
     absent: [...monitorVolumes, ...monitorSecrets, monitorNames.network] });

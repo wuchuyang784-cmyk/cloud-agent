@@ -210,6 +210,7 @@ export async function up() {
     }
   }
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).assertMonitoringResources(state);
+  if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).assertRuntimeResources('preprod', state);
   let gateway = await owned('container', names.gateway, state);
   if (!gateway?.State.Running) await freePort();
   if (state.monitoring?.enabled && (!gateway?.State.Running || !gateway.HostConfig?.PortBindings?.['9443/tcp'])) await freePort(9443);
@@ -283,6 +284,7 @@ export async function up() {
   state.certificateFingerprint = new X509Certificate(cert).fingerprint256;
   state.updatedAt = new Date().toISOString();
   await saveState(state);
+  if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).startRuntimeEnvironment('preprod');
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).deployMonitoring(state);
   console.log('预发已就绪：' + origin + '，双 API / 独立 bairui_preprod。');
   console.log('公开 CA 证书：' + paths.ca + '；未修改 Windows 信任。');
@@ -311,6 +313,7 @@ export async function stop() {
   const local = await localDocker();
   if (local.nodeId !== state.nodeId || local.endpoint !== state.endpoint) throw new Error('当前 Docker 不是记录的预发节点。');
   await checkResources(state);
+  if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).stopRuntimeEnvironment('preprod');
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).stopMonitoringServices(state);
   if (await owned('container', names.gateway, state)) await docker(['container', 'stop', '--time', '15', names.gateway]);
   await pauseApi(state);

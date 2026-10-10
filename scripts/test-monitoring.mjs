@@ -34,7 +34,7 @@ async function verify() {
   const local = await localDocker();
   assert.equal(local.nodeId, state.nodeId); assert.equal(local.endpoint, state.endpoint);
   await assertMonitoringResources(state);
-  await validateMonitoring();
+  await validateMonitoring(state.monitoring.runtime);
   const gateway = await owned('container', names.gateway, state);
   for (const [port, host] of [['443/tcp', '8443'], ['9443/tcp', '9443']]) {
     assert.deepEqual(gateway.HostConfig.PortBindings[port], [{ HostIp: '127.0.0.1', HostPort: host }]);

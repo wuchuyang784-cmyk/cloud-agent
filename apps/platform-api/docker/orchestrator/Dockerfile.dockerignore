@@ -1,0 +1,7 @@
+**
+!apps/
+!apps/platform-api/
+!apps/platform-api/package.json
+!apps/platform-api/package-lock.json
+!apps/platform-api/src/
+!apps/platform-api/src/**

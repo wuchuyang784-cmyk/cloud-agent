@@ -36,14 +36,15 @@ export function validationDockerArgs(dir, tokens) {
     '--mount', 'type=bind,source=' + tokens + ',target=/run/secrets,readonly'];
 }
 
-export async function validateMonitoring() {
+export async function validateMonitoring(runtime) {
   await localDocker();
   const dir = join(output, 'monitoring-validation');
   const tokens = join(dir, 'test-secrets');
   await mkdir(tokens, { recursive: true });
-  for (const [name, asset] of Object.entries(monitoringAssets())) await writeFile(join(dir, name), JSON.stringify(asset, null, 2));
+  for (const [name, asset] of Object.entries(monitoringAssets(runtime))) await writeFile(join(dir, name), JSON.stringify(asset, null, 2));
   await writeFile(join(dir, 'rule-tests.json'), JSON.stringify(ruleTests(), null, 2));
   for (const name of ['metrics-token', 'alert-token']) await writeFile(join(tokens, name), 'validation-only-not-a-real-secret-00000000');
+  if (runtime?.enabled) for (const environment of runtime.environments) await writeFile(join(tokens, 'runtime-' + environment + '-metrics'), 'validation-only-not-a-real-secret-00000000');
   const args = validationDockerArgs(dir, tokens);
   for (const [image, entrypoint, command] of [
     [monitorImages.prometheus, '/bin/promtool', ['check', 'config', '/etc/bairui/prometheus.json']],

@@ -21,6 +21,16 @@
 
 ## 项目定位
 
+### E3：业务库与常驻预发接入（2026-10-10，已部署并完成常驻验收）
+
+- 用户明确授权后，分别备份并追加业务 `bairui` 和预发 `bairui_preprod` 的 039/040；不重跑既有治理迁移，不给应用或 Controller 用户启停权限。业务默认表授权已针对 Runtime control 表撤销；原 6 用户、6 Agent、4 资源与历史路由保留，不插入业务演示 Agent。
+- 两个环境各自拥有受限 Controller 登录、独立 ledger 数据库/角色、安装身份、HMAC、TLS、指标 Secret 和 internal 网络。独立常驻容器 `unless-stopped` + `--init`，没有宿主端口；Controller 非 root、无 Docker socket，只有编排器持有 Docker 权限，平台 API 不增权。
+- managed 入口 `npm run runtime:deploy -- up/status/stop business` 或 `preprod`；只读私有 JSON，不读业务 `.env`。isolation 原限制保留。普通预发 stop/up 联动预发 Runtime，不停止或升级业务 Runtime；共享监控停机期间业务 Controller 运行但不采集。
+- 预发 API/网关镜像版本 `984167c866f5c602`，编排器 `af542fe7243cff14`；原卷、平台 Secret 和 Caddy CA 保留。监控显式采集两个 Controller，原七条平台规则加五条 Runtime 规则；真实 firing/resolved 已验证。
+- 常驻端到端报告 `output/runtime/acceptance-2026-10-10T05-28-12-590Z.json` 全通过，包含真实内核限制、Controller 自动重启保留原 run、真实 TTL 回收与审计、治理停止/解除不重启，以及告警闭环。仅预发新建无凭据验收身份，测试管理员已撤权，探针已回收，历史保留；业务没有活跃 Runtime run。
+- 完整 `test:preprod` 与最终 `test:monitoring` 均通过，报告 `acceptance-2026-10-10T05-29-31-790Z-ed9899.json`、`monitoring-acceptance-2026-10-10T09-08-39-985Z-e47976.json`；真实数据库故障、双 API 滚动、完整 stop/up、Grafana Viewer 与监控四组件重建均验收。停启前后核对 Runtime 身份、网络、Secret、私有配置、ledger OID/历史与 CA 不变，业务两个进程未重启；记录在 `output/runtime/stop-up-preservation-2026-10-10.json`。
+- 真实 pi/dsh/Provider、用户 Agent 创建/执行、旧 Worker/Runtime/Boundary 仍关闭；固定无模型 probe 不等于真实 Agent 上线。不代表编排器崩溃恢复、整机重启、跨节点 HA 或公网生产验收。部署与备份说明见 `docs/48-e3-managed-runtime-rollout.md`；下方 E3/E2/E1 为历史隔离阶段记录。
+
 ### E3：常驻 Controller、状态回流及告警（2026-10-10，本机隔离验收，未部署）
 
 - 独立入口 `npm run controller:isolation`，实现位于 `apps/platform-api/src/runtime/supervision/`；显式 isolation、回环专用受限 PostgreSQL、HTTPS 编排器、精确 Runtime 白名单和独立指标 token，不读业务 `.env`，不加入 dev/app，不持有 Docker 权限或安装后台系统服务。

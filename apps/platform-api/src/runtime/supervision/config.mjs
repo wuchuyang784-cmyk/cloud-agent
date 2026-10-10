@@ -1,5 +1,6 @@
 import { RemoteRuntimeDriver } from '../orchestration/remote-driver.mjs';
 import { isIP } from 'node:net';
+import { hasSafeDatabaseParameters, isManagedDatabase } from '../managed-database.mjs';
 
 const csv = value => String(value ?? '').split(',').map(value => value.trim()).filter(Boolean);
 function preciseRange(value) {
@@ -10,21 +11,22 @@ function preciseRange(value) {
 }
 
 export function readControllerConfig(env) {
-  if (env.BAIRUI_RUNTIME_CONTROLLER_MODE !== 'isolation') throw new Error('runtime_controller_isolation_mode_required');
+  const managed = env.BAIRUI_RUNTIME_CONTROLLER_MODE === 'managed';
+  if (!managed && env.BAIRUI_RUNTIME_CONTROLLER_MODE !== 'isolation') throw new Error('runtime_controller_isolation_mode_required');
   const connectionString = env.BAIRUI_RUNTIME_CONTROLLER_DATABASE_URL;
   let database;
   try { database = new URL(connectionString); } catch { throw new Error('runtime_controller_config_invalid'); }
   // pg's query parameters can override authority/path connection fields.
   // Allow only a fixed search_path; no host/database/role/credential overrides.
-  const parameters = [...database.searchParams];
-  if (parameters.length > 1 || parameters.some(([key, value]) => key !== 'options'
-    || !/^-c search_path=[a-z][a-z0-9_]{0,62}(?:,public)?$/.test(value))) throw new Error('runtime_controller_config_invalid');
+  if (!hasSafeDatabaseParameters(database)) throw new Error('runtime_controller_config_invalid');
   const intervalMs = Number(env.BAIRUI_RUNTIME_CONTROLLER_INTERVAL_MS ?? 1000);
   const batchSize = Number(env.BAIRUI_RUNTIME_CONTROLLER_BATCH_SIZE ?? 1);
   const maxAttempts = Number(env.BAIRUI_RUNTIME_CONTROLLER_MAX_ATTEMPTS ?? 8);
   const port = Number(env.BAIRUI_RUNTIME_CONTROLLER_METRICS_PORT ?? 9495);
-  if (!['postgres:', 'postgresql:'].includes(database.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(database.hostname)
-    || !database.username || !database.pathname.slice(1) || ['bairui', 'bairui_preprod', 'postgres'].includes(decodeURIComponent(database.pathname.slice(1)))
+  const permittedDatabase = managed ? isManagedDatabase(env, database, connectionString, 'controller')
+    : ['localhost', '127.0.0.1', '[::1]'].includes(database.hostname) && !!database.username
+      && !!database.pathname.slice(1) && !['bairui', 'bairui_preprod', 'postgres'].includes(decodeURIComponent(database.pathname.slice(1)));
+  if (!['postgres:', 'postgresql:'].includes(database.protocol) || !permittedDatabase
     || connectionString === env.DATABASE_URL || !env.BAIRUI_RUNTIME_CONTROLLER_METRICS_TOKEN_FILE
     || !Number.isSafeInteger(intervalMs) || intervalMs < 100 || intervalMs > 10000
     || !Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 10
@@ -35,6 +37,6 @@ export function readControllerConfig(env) {
     || csv(env.BAIRUI_RUNTIME_ALLOWED_CIDRS).some(value => !preciseRange(value))
     || csv(env.BAIRUI_RUNTIME_ALLOWED_HOSTS).some(value => /[\s\/*?#@]/.test(value))
     || !new RemoteRuntimeDriver({ env }).canRun().ok) throw new Error('runtime_controller_config_invalid');
-  return { connectionString, host: '127.0.0.1', port, intervalMs, batchSize, maxAttempts,
+  return { connectionString, host: managed ? '0.0.0.0' : '127.0.0.1', port, intervalMs, batchSize, maxAttempts,
     tokenFile: env.BAIRUI_RUNTIME_CONTROLLER_METRICS_TOKEN_FILE };
 }

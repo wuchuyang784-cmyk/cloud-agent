@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { isIP } from 'node:net';
 
 const exec = promisify(execFile);
 export const OWNER_LABEL = 'io.bairui.orchestrator.installation';
@@ -31,9 +32,11 @@ export function createArguments(options, row) {
 }
 
 export class DockerOrchestratorDriver {
-  constructor({ installationId, network, image, execute }) {
+  constructor({ installationId, network, image, runtimeAddressMode = 'hostname', execute }) {
     this.options = { installationId, network, image };
     validate(this.options);
+    if (!['hostname', 'ip'].includes(runtimeAddressMode)) throw new Error('docker_config_invalid');
+    this.runtimeAddressMode = runtimeAddressMode;
     this.execute = execute ?? (async args => (await exec('docker', args, {
       windowsHide: true, timeout: 8000, maxBuffer: 1024 * 1024,
     })).stdout);
@@ -84,8 +87,17 @@ export class DockerOrchestratorDriver {
     const info = await this.#inspect(row);
     if (!info) return null;
     if (!row.terminal && row.request) this.#validatePolicy(info, row);
-    return { id: info.Id, running: info.State?.Running === true,
-      runtimeUrl: `http://${containerName(this.options.installationId, row.runId)}:8092` };
+    const running = info.State?.Running === true;
+    let runtimeUrl;
+    if (this.runtimeAddressMode === 'hostname') runtimeUrl = `http://${containerName(this.options.installationId, row.runId)}:8092`;
+    // A terminal cleanup needs ownership/ID only and must still reclaim a
+    // container whose network policy drifted or whose address disappeared.
+    else if (running && !row.terminal) {
+      const address = info.NetworkSettings?.Networks?.[this.options.network]?.IPAddress;
+      if (typeof address !== 'string' || isIP(address) !== 4) throw new Error('docker_runtime_address_invalid');
+      runtimeUrl = `http://${address}:8092`;
+    }
+    return { id: info.Id, running, ...(runtimeUrl ? { runtimeUrl } : {}) };
   }
   async create(row) {
     await this.check();

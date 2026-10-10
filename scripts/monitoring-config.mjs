@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
+import { runtimeRules } from './runtime-monitoring-config.mjs';
+import { runtimeNames } from './runtime-deployment-config.mjs';
 
 export const monitorOrigin = 'https://localhost:9443';
 export const monitorNames = Object.freeze({
@@ -19,7 +21,15 @@ export const monitorServices = ['prometheus', 'grafana', 'alertmanager', 'receiv
 export const monitorVolumes = [monitorNames.promVolume, monitorNames.grafanaVolume, monitorNames.alertVolume, monitorNames.receiverVolume];
 export const monitorSecrets = [monitorNames.metricsSecret, monitorNames.alertSecret, monitorNames.grafanaSecret];
 
-export function monitoringAssets() {
+function runtimeEnvironments(runtime) {
+  if (!runtime?.enabled) return [];
+  assert.ok(Array.isArray(runtime.environments) && runtime.environments.length > 0 && runtime.environments.length <= 2);
+  assert.equal(new Set(runtime.environments).size, runtime.environments.length);
+  for (const env of runtime.environments) runtimeNames(env);
+  return [...runtime.environments].sort();
+}
+export function monitoringAssets(runtime) {
+  const environments = runtimeEnvironments(runtime);
   const rule = (alert, expr, duration = '1m', severity = 'warning') => ({ alert, expr, for: duration, labels: { severity } });
   const traffic = 'bairui_http_requests_total{job="bairui-api",route!~"/(livez|readyz|healthz)"}';
   const errorRate = 'sum(rate(bairui_http_requests_total{job="bairui-api",status=~"5..",route!~"/(livez|readyz|healthz)"}[5m])) / clamp_min(sum(rate(' + traffic + '[5m])), 0.001)';
@@ -47,6 +57,15 @@ export function monitoringAssets() {
       staticJob('grafana', monitorNames.grafana + ':3000'),
     ],
   };
+  if (environments.length) {
+    rules.groups.push(...runtimeRules().groups);
+    for (const environment of environments) prometheus.scrape_configs.push({
+      ...staticJob('bairui-runtime-' + environment, runtimeNames(environment).controller + ':9495'),
+      authorization: { type: 'Bearer', credentials_file: '/run/secrets/runtime-' + environment + '-metrics' },
+      relabel_configs: [{ target_label: 'job', replacement: 'bairui-runtime-controller' }],
+      sample_limit: 100, label_limit: 12, label_value_length_limit: 128, body_size_limit: '128KB',
+    });
+  }
   const alertmanager = {
     global: { resolve_timeout: '1m' },
     route: { receiver: 'local', group_by: ['alertname'], group_wait: '5s', group_interval: '15s', repeat_interval: '1h' },
@@ -85,10 +104,11 @@ export function monitoringAssets() {
   };
 }
 
-export const monitoringRevision = () => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(), images: monitorImages })).digest('hex').slice(0, 16);
-export const monitorConfigName = name => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision();
+export const monitoringRevision = runtime => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(runtime), images: monitorImages })).digest('hex').slice(0, 16);
+export const monitorConfigName = (name, runtime) => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision(runtime);
 
 export function monitoringStack({ installation, nodeId, revision, monitoring }) {
+  const environments = runtimeEnvironments(monitoring?.runtime);
   assert.match(installation, /^[a-f0-9]{24}$/); assert.match(nodeId, /^[a-z0-9-]+$/); assert.match(revision, /^[a-f0-9]{16}$/);
   assert.ok(isIP(monitoring?.gatewayIp) === 4 && !/^(0|127|169|224|255)\./.test(monitoring.gatewayIp), 'exact_monitor_gateway_ip_required');
   const labels = { 'bairui.preprod.installation': installation };
@@ -107,7 +127,7 @@ export function monitoringStack({ installation, nodeId, revision, monitoring }) 
       prometheus: { ...service(monitorImages.prometheus, '65534:65534', '512M', '0.50'),
         command: ['--config.file=/etc/bairui/prometheus.json', '--storage.tsdb.path=/prometheus', '--storage.tsdb.retention.time=7d', '--storage.tsdb.retention.size=1GB', '--query.max-concurrency=4', '--query.timeout=15s'],
         volumes: ['promdata:/prometheus'], configs: [config('prometheus.json', '/etc/bairui/prometheus.json'), config('rules.json', '/etc/bairui/rules.json')],
-        secrets: [secret('metrics_token', 'metrics-token', '65534')], healthcheck: health(9090, '/-/ready'),
+        secrets: [secret('metrics_token', 'metrics-token', '65534'), ...environments.map(e => secret('runtime_' + e + '_metrics', 'runtime-' + e + '-metrics', '65534'))], healthcheck: health(9090, '/-/ready'),
       },
       alertmanager: { ...service(monitorImages.alertmanager, '65534:65534', '128M', '0.20'),
         command: ['--config.file=/etc/bairui/alertmanager.json', '--storage.path=/alertmanager', '--cluster.listen-address=', '--data.retention=168h'],
@@ -140,7 +160,8 @@ export function monitoringStack({ installation, nodeId, revision, monitoring }) 
     },
     networks: { monitor: { external: { name: monitorNames.network } } },
     volumes: { promdata: { external: { name: monitorNames.promVolume } }, grafanadata: { external: { name: monitorNames.grafanaVolume } }, alertdata: { external: { name: monitorNames.alertVolume } }, receipts: { external: { name: monitorNames.receiverVolume } } },
-    secrets: { metrics_token: { external: { name: monitorNames.metricsSecret } }, alert_token: { external: { name: monitorNames.alertSecret } }, grafana_password: { external: { name: monitorNames.grafanaSecret } } },
-    configs: Object.fromEntries(Object.keys(monitoringAssets()).map(name => [name, { external: { name: monitorConfigName(name) } }])),
+    secrets: { metrics_token: { external: { name: monitorNames.metricsSecret } }, alert_token: { external: { name: monitorNames.alertSecret } }, grafana_password: { external: { name: monitorNames.grafanaSecret } },
+      ...Object.fromEntries(environments.map(e => ['runtime_' + e + '_metrics', { external: { name: runtimeNames(e).metricsSecret } }])) },
+    configs: Object.fromEntries(Object.keys(monitoringAssets(monitoring?.runtime)).map(name => [name, { external: { name: monitorConfigName(name, monitoring?.runtime) } }])),
   };
 }

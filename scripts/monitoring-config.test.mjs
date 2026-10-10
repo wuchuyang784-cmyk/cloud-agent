@@ -3,9 +3,27 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { monitoringStack, monitoringAssets, monitorNames, monitorImages, monitorOrigin } from './monitoring-config.mjs';
 import { stackConfig, gatewayConfig } from './preprod-config.mjs';
+import { monitoringRevision } from './monitoring-config.mjs';
 
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
 const monitorInput = { ...input, monitoring: { enabled: true, gatewayIp: '10.0.3.9' } };
+
+test('managed runtime monitoring is opt-in and uses separate fixed environment targets', () => {
+  const runtime = { enabled: true, environments: ['business', 'preprod'] };
+  const assets = monitoringAssets(runtime);
+  assert.equal(assets['rules.json'].groups.flatMap(g => g.rules).filter(r => r.alert.startsWith('Runtime')).length, 5);
+  const jobs = assets['prometheus.json'].scrape_configs.filter(j => j.job_name.startsWith('bairui-runtime-'));
+  assert.equal(jobs.length, 2);
+  assert.deepEqual(jobs.map(j => j.static_configs[0].targets[0]), ['bairui-runtime-business-controller:9495', 'bairui-runtime-preprod-controller:9495']);
+  assert.ok(jobs.every(j => j.relabel_configs[0].replacement === 'bairui-runtime-controller'));
+  assert.notEqual(jobs[0].authorization.credentials_file, jobs[1].authorization.credentials_file);
+  // Separate jobs are relabelled into the fixed selector, each with its own token.
+  const secrets = monitoringStack({ ...monitorInput, monitoring: { ...monitorInput.monitoring, runtime } }).secrets;
+  assert.ok(secrets.runtime_business_metrics && secrets.runtime_preprod_metrics);
+  assert.notEqual(monitoringRevision(runtime), monitoringRevision());
+  assert.equal(monitoringAssets()['prometheus.json'].scrape_configs.some(j => j.job_name.includes('runtime')), false);
+  assert.throws(() => monitoringAssets({ enabled: true, environments: ['evil'] }));
+});
 
 test('monitoring uses pinned bounded private services without host or database privileges', () => {
   const stack = monitoringStack(monitorInput);
