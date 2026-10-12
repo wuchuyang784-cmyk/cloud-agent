@@ -4,7 +4,7 @@ import { handleGovernance } from './governance.mjs';
 const statuses = new Set(['uninitialized', 'provisioning', 'starting', 'ready', 'degraded', 'offline', 'failed', 'stopped']);
 const resources = new Set(['me', 'users', 'agents']);
 
-export async function handleAdmin({ request, response, url, principal, store, enabled, sendJson, sendError, requestId, env, readJson, monitoring }) {
+export async function handleAdmin({ request, response, url, principal, store, enabled, sendJson, sendError, requestId, env, readJson, monitoring, grafana }) {
   const fail = (status, code) => sendError(response, status, code, code, requestId);
   response.setHeader('cache-control', 'no-store');
   response.setHeader('vary', 'Cookie');
@@ -14,6 +14,10 @@ export async function handleAdmin({ request, response, url, principal, store, en
     // Authorization never comes from an organization role or a browser-supplied actor.
     const access = await readAdmin(store, principal.userId, 'me');
     if (!access) return fail(403, 'platform_role_required');
+    if (url.pathname.startsWith('/api/admin/grafana/')) {
+      if (!access.permissions?.includes('monitoring:read')) return fail(403, 'platform_role_required');
+      return await grafana.handle({ request, response, url, principal, readJson, fail });
+    }
     if (url.pathname === '/api/admin/monitoring/access') {
       if (!['GET', 'HEAD'].includes(request.method)) {
         response.setHeader('allow', 'GET, HEAD');
@@ -38,7 +42,9 @@ export async function handleAdmin({ request, response, url, principal, store, en
       if ((severity && !['info', 'warning', 'critical'].includes(severity)) || (state && !['firing', 'pending'].includes(state))) return fail(422, 'invalid_admin_query');
       if (!access.permissions?.includes(alerts ? 'alerts:read' : 'monitoring:read')) return fail(403, 'platform_role_required');
       if (!monitoring?.enabled) return fail(503, 'monitoring_unavailable');
-      try { return sendJson(response, 200, alerts ? await monitoring.alerts({ severity, state }) : await monitoring.overview()); }
+      try { return sendJson(response, 200, alerts ? await monitoring.alerts({ severity, state }) : { ...await monitoring.overview(),
+        dashboardUrl: grafana?.enabled ? grafana.dashboardUrl : 'https://localhost:9443/d/bairui-platform/bairui-platform?kiosk',
+        scope: grafana?.enabled ? 'business' : 'preprod' }); }
       catch { return fail(503, 'monitoring_unavailable'); }
     }
     const governance = url.pathname.match(/^\/api\/admin\/users\/([a-zA-Z0-9_-]{1,200})\/governance$/);

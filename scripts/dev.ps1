@@ -96,6 +96,12 @@ function Assert-ServicePortsAvailable {
 
 Set-Location -LiteralPath $root
 Initialize-LocalEnv -EnvFile (Join-Path $root '.env') -ExampleFile (Join-Path $root '.env.example')
+# Explicit local-only bridge; never load monitoring credentials into business .env.
+$monitorConnector = Join-Path $root 'output/business-monitoring/connector.json'
+if ((Test-Path -LiteralPath $monitorConnector) -and -not $env:BAIRUI_ADMIN_MONITORING_CONFIG_FILE) {
+    [Environment]::SetEnvironmentVariable('BAIRUI_ADMIN_MONITORING_CONFIG_FILE', $monitorConnector, 'Process')
+    Write-Step '已接入独立业务监控配置；未修改业务凭据' 'DarkGray'
+}
 $serviceJson = & node (Join-Path $PSScriptRoot 'dev-services.mjs') $Target
 if ($LASTEXITCODE -ne 0) { throw '启动配置检查失败，请检查平台模式、认证和数据库配置' }
 # PowerShell 5.1 返回整个 JSON 数组，不能再用 @() 包成嵌套数组。

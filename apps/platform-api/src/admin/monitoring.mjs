@@ -32,7 +32,8 @@ async function boundedJson(response, maxBytes) {
   try { return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks))); }
   catch { throw new MonitoringUnavailable(); }
 }
-export function createAdminMonitoring({ baseUrl = '', fetchImpl = fetch, timeoutMs = 3000, maxBytes = 262144, maxConcurrent = 4, maxQueue = 32 } = {}) {
+export function createAdminMonitoring({ baseUrl = '', token = '', fetchImpl = fetch, timeoutMs = 3000, maxBytes = 262144, maxConcurrent = 4, maxQueue = 32 } = {}) {
+  if (token && !/^[a-f0-9]{64}$/.test(token)) throw new Error('invalid_monitoring_configuration');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || !Number.isSafeInteger(maxBytes) || maxBytes < 1024
     || !Number.isSafeInteger(maxConcurrent) || maxConcurrent < 1 || maxConcurrent > 16
     || !Number.isSafeInteger(maxQueue) || maxQueue < 1 || maxQueue > 256) throw new Error('invalid_monitoring_configuration');
@@ -71,7 +72,7 @@ export function createAdminMonitoring({ baseUrl = '', fetchImpl = fetch, timeout
     try {
       const url = new URL(origin + path);
       for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-      const response = await fetchImpl(url, { headers: { accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+      const response = await fetchImpl(url, { headers: { accept: 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) }, redirect: 'error', signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
       const value = await boundedJson(response, maxBytes);
       if (value?.status !== 'success' || !value.data) throw new MonitoringUnavailable();
       return value.data;

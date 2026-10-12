@@ -2,10 +2,11 @@ import { createApp } from './app.mjs';
 import { loadSecretEnv } from './secret-env.mjs';
 import { createShutdown } from './service-lifecycle.mjs';
 import { safeLog } from './observability/safe-log.mjs';
+import { loadBusinessMonitoringEnv } from './admin/business-monitoring-env.mjs';
 
 let app, drain;
 try {
-  const env = await loadSecretEnv(process.env);
+  const env = await loadBusinessMonitoringEnv(await loadSecretEnv(process.env));
   const port = Number(env.PORT ?? 8080);
   app = createApp({ env, databaseOptions: {
     max: Number(env.BAIRUI_DB_POOL_MAX ?? 20),

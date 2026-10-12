@@ -21,6 +21,24 @@
 
 ## 项目定位
 
+### F1：固定源码 pi Runtime（2026-10-11，独立验收通过，未部署）
+
+- 本批位于 `apps/platform-api/src/runtime/pi/production/`，独立固定配置/HMAC 请求、单任务有界 NDJSON、持久会话与任务 UUID 占位；旧 pi adapter/wrapper 保留，仅供 legacy 回归。不改 API/dev 启动链、E2 probe、平台能力开关或既有部署。
+- `upstreams/pi` 固定 `c1d4c801114545f47c440921d8b3e04aeb1e565d` / 0.85.1，拒绝源目录和 gitlink/锁文件漂移。模型目录 JSON 从同版本 pi-ai 发布 tarball 单独固定 SHA-512 提取（无 JS），保留上游目录校验与源码编译；记录数据发布提交区别，不将其冒充主源码内容。
+- 独立命令 `npm run pi:source:check`、`pi:build`、`test:pi`、`test:pi:live`；产物在忽略的 `output/pi-runtime/`。真实 pi + HTTPS/SSE fixture 验收不使用用户 Key/付费模型，按归属清理临时容器/卷/网络，不操作 Linux 服务器、业务库或常驻预发。
+- F1 专项 48 通过；后端全量 326 通过/9 数据库专项跳过/0 失败；独立规格与质量审查完成。实际 amd64 镜像版本 `a9fbc2fa0e66252fcb35`，真实容器报告 `output/pi-runtime/acceptance/2026-10-11T15-01-34-473Z.json` 的 16 项检查均通过，含会话恢复、真实工具、超时/取消、输出超限、临时资源清理与原容器保留。未验收 arm64 或真实付费 Provider。
+- F1 不是用户 Agent 已上线或多租户沙箱完成：工具与 wrapper/state 同 UID，F2 凭据保险库/模型网关与 F3 控制 Secret、网络、存储、进程树隔离必须后续交付；不允许据此开放真实用户创建/执行。服务器规格主要影响 F3/F4/F7，非本批前置条件。运行契约与验证记录见 `docs/50-f1-pi-runtime.md`。
+
+### 业务管理端 Grafana（2026-10-11，本机已部署）
+
+- 当前 `http://localhost:5173/admin/` 使用业务 Better Auth 会话与平台角色访问同源 Grafana Viewer，不再要求业务账号登录独立预发。五项导航保留；客户端不增加平台监控入口。
+- 独立业务 Prometheus/Grafana/Caddy，入口 `npm run monitor:business:up/status/stop`（分别执行对应 script）；只有机器 Bearer 桥接绑定回环 9493。私有 connector 在已忽略 `output/business-monitoring/`，dev 显式加载，不修改业务 `.env`，不在生产启用该本机连接配置。
+- 17 个固定面板采集当前业务 API（预期 1 副本）、业务 PostgreSQL、Windows 实测 CPU/内存及两环境 Controller；每次浏览器请求重验会话、active 账号和平台监控权限。只开放固定只读接口及固定 PromQL；不放开任意数据源代理、配置写入或 Docker 权限。
+- 十二条业务规则的固定来源标签防止与共享 Alertmanager 的预发告警 fingerprint 混淆；旧接收器保留 `instance=127.0.0.1:9465` 作为业务采集来源，不代表故障 Controller 地址。原预发服务、卷、Secret、CA 与认证配置保留。
+- 更新先暂存并完成官方 promtool/Caddy 校验，再短暂停止仅本安装三个监控容器，原子发布/重挂载；保留 token、数据卷及历史。Controller 当前启动网络错误已恢复；恢复必须匹配本次 Docker 启动错误分类，旧 State.Error 不授权删除。
+- 真实 Better Auth/受限 PostgreSQL 浏览器验收通过：17 面板查询、即时数字不重复、Viewer、刷新/独立打开、390/320px、暂停/恢复/退出及普通账号拒绝。真实业务 Grafana firing/resolved 和完整 stop/up 保留验收通过；原业务 6 用户、6 Agent、4 资源、0 run 未改变。
+- 后端 284 通过/9 数据库容器专项跳过/0 失败，管理端 18、业务监控/原监控/Runtime 配置合计 97 项、预发配置 63 项通过，管理端构建通过。报告与边界见 `docs/49-business-admin-grafana.md`。本机长驻开发进程不等于 Windows 开机服务；未开放真实 Agent 或客户端部署/运维/审批功能。
+
 ### E3：业务库与常驻预发接入（2026-10-10，已部署并完成常驻验收）
 
 - 用户明确授权后，分别备份并追加业务 `bairui` 和预发 `bairui_preprod` 的 039/040；不重跑既有治理迁移，不给应用或 Controller 用户启停权限。业务默认表授权已针对 Runtime control 表撤销；原 6 用户、6 Agent、4 资源与历史路由保留，不插入业务演示 Agent。

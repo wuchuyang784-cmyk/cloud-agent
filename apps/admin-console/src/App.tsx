@@ -48,7 +48,7 @@ export function App() {
   const title = { overview: '平台概览', users: '用户账号', agents: 'Agent 服务', monitoring: '运行监控', alerts: '告警' }[view];
   useEffect(() => { void model.load(query); return model.cancel; }, [query]);
   useEffect(() => {
-    const refresh = () => { if (document.visibilityState === 'visible' && model.getSnapshot().phase === 'ready' && !model.getSnapshot().governance) void model.load(query); };
+    const refresh = () => { if (document.visibilityState === 'visible' && model.getSnapshot().phase === 'ready' && !model.getSnapshot().governance) void model.refresh(query); };
     window.addEventListener('focus', refresh);
     document.addEventListener('visibilitychange', refresh);
     const timer = window.setInterval(refresh, 30000);
@@ -97,6 +97,6 @@ export function App() {
         </tbody></table></div>
       <footer className="pagination"><span>本页 {state.items.length} 条</span><div><label>每页 <select aria-label="每页条数" value={query.limit} onChange={e => reset({ ...query, limit: e.target.value })}>{['25', '50', '100'].map(n => <option key={n}>{n}</option>)}</select> 条</label><button className="icon-button" title="上一页" aria-label="上一页" disabled={busy || !history.length} onClick={pageBack}><ChevronLeft size={18} /></button><span className="page-number">{history.length + 1}</span>        <button className="icon-button" title="下一页" aria-label="下一页" disabled={busy || !state.nextCursor} onClick={pageNext}><ChevronRight size={18} /></button></div></footer></>
         : view === 'overview' ? <OverviewView value={state.monitoring} />
-          : view === 'monitoring' ? <MonitoringView value={state.monitoring} /> : <AlertsView value={state.monitoring} />}
+          : view === 'monitoring' ? <MonitoringView value={state.monitoring} onRetry={() => void model.load(query)} /> : <AlertsView value={state.monitoring} />}
       </main></div>{state.governance && <GovernanceDialog key={state.governance.target.id} model={model} value={state.governance} canGovern={Boolean(state.me?.permissions.includes('users:govern') && state.me.user.id !== state.governance.target.id)} />}</div>;
 }

@@ -6,6 +6,43 @@ const me = { role: 'platform_viewer', permissions: ['users:read', 'agents:read']
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
+test('governance denial invalidates a concurrent background refresh, including transports ignoring abort', async () => {
+  for (const [status, phase] of [[401, 'login'], [403, 'denied']]) {
+    const pending = deferred(); let refreshing = false; let refreshSignal;
+    const model = new AdminSession(async (path, options) => {
+      if (path.includes('/governance')) return response({}, status);
+      if (path === '/api/admin/me') return response(me);
+      if (refreshing) { refreshSignal = options.signal; return pending.promise; }
+      return response({ items: [{ id: 'target' }], nextCursor: null });
+    });
+    await model.load({ view: 'users' }); refreshing = true;
+    const refresh = model.refresh({ view: 'users' });
+    await new Promise(resolve => setImmediate(resolve));
+    await model.openGovernance({ id: 'target' });
+    assert.equal(model.getSnapshot().phase, phase);
+    pending.resolve(response({ items: [{ id: 'stale-secret' }], nextCursor: null })); await refresh;
+    assert.equal(model.getSnapshot().phase, phase);
+    assert.equal(model.getSnapshot().me, null);
+    assert.deepEqual(model.getSnapshot().items, []);
+    assert.ok(refreshSignal.aborted);
+  }
+});
+
+test('background monitoring refresh keeps its verified iframe mounted but access revocation clears it', async () => {
+  let pending = null;
+  const identity = { ...me, permissions: [...me.permissions, 'monitoring:read'] };
+  const model = new AdminSession(async path => pending ? pending.promise : response(path === '/api/admin/me' ? identity
+    : { metrics: {}, dashboardUrl: '/api/admin/grafana/d/bairui-platform/bairui-platform?kiosk', scope: 'business' }));
+  await model.load({ view: 'monitoring' });
+  pending = deferred();
+  const refresh = model.refresh({ view: 'monitoring' });
+  assert.equal(model.getSnapshot().phase, 'ready');
+  assert.equal(model.getSnapshot().monitoring.phase, 'ready');
+  pending.resolve(response({}, 403)); await refresh;
+  assert.equal(model.getSnapshot().phase, 'denied');
+  assert.equal(model.getSnapshot().monitoring.data, null);
+});
+
 test('governance UI: timeout retry preserves request identity, confirmed changes refresh status', async () => {
   const commands = []; let attempts = 0;
   const model = new AdminSession(async (path, options) => {

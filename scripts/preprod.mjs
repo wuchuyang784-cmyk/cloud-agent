@@ -17,14 +17,19 @@ export const paths = { state: join(output, 'state.json'), ca: join(output, 'root
 const childEnv = { ...process.env };
 for (const key of Object.keys(childEnv)) if (/^(BAIRUI_|BETTER_AUTH_|DATABASE_URL$|POSTGRES_|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$)/.test(key)) delete childEnv[key];
 
+export function dockerCommandFailure(args, stderr, { logFile } = {}) {
+  const safe = new Error('Docker 命令失败：' + args.slice(0, 2).join(' ') + (logFile ? '，请检查 ' + logFile : '（详细诊断请查看对应服务状态）'));
+  safe.notFound = missingDockerObject(stderr);
+  // Keep only a boolean from this failed command, never raw daemon diagnostics.
+  safe.networkStartMissing = args[0] === 'start' && /failed to set up container networking:.*\bnetwork\b.*\bnot found\b/i.test(stderr);
+  return safe;
+}
 export async function docker(args, { input, timeout = 120000, logFile, includeStderr = false } = {}) {
   return new Promise((resolveResult, reject) => {
     const child = execFile('docker', args, { cwd: root, env: childEnv, windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024 }, async (error, stdout, stderr) => {
       if (logFile) await writeFile(logFile, stdout + '\n' + stderr).catch(() => {});
       if (!error) return resolveResult((stdout + (includeStderr ? '\n' + stderr : '')).trim());
-      const safe = new Error('Docker 命令失败：' + args.slice(0, 2).join(' ') + (logFile ? '，请检查 ' + logFile : '（详细诊断请查看对应服务状态）'));
-      safe.notFound = missingDockerObject(stderr);
-      reject(safe);
+      reject(dockerCommandFailure(args, stderr, { logFile }));
     });
     child.stdin.on('error', () => {});
     child.stdin.end(input);

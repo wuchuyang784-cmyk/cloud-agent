@@ -63,6 +63,9 @@ export class AdminSession {
   }
   private fail(error: unknown, generation: number, signingIn = false) {
     if (generation !== this.generation) return;
+    this.generation++;
+    this.detailGeneration++;
+    this.abort.abort();
     const code = error instanceof HttpError ? error.status : 0;
     const phase = code === 401 ? 'login' : code === 403 ? 'denied' : signingIn ? 'login' : 'error';
     this.publish({ phase, me: null, items: [], nextCursor: null, updatedAt: null, governance: null, monitoring: { phase: 'idle', data: null, error: '', updatedAt: null },
@@ -101,6 +104,13 @@ export class AdminSession {
     this.currentView = query.view;
     const { generation, signal } = this.begin('loading');
     try { await this.read(query, generation, signal); }
+    catch (error) { this.fail(error, generation); }
+  };
+  refresh = async (query: Query) => {
+    if (this.locked || this.currentView !== query.view || this.state.phase !== 'ready') return;
+    this.abort.abort(); this.abort = new AbortController();
+    const generation = ++this.generation;
+    try { await this.read(query, generation, this.abort.signal); }
     catch (error) { this.fail(error, generation); }
   };
   closeGovernance = () => { this.detailGeneration++; this.publish({ governance: null }); };

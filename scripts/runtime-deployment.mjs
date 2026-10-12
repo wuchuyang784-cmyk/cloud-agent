@@ -197,34 +197,120 @@ export async function buildRuntimeOrchestrator() {
     { timeout: 600000, logFile: join(base, 'build-orchestrator.log') });
   return tag;
 }
+const runtimePrivateFiles = ['controller/controller.json', 'controller/metrics-token', 'controller/tls/cert.pem',
+  'orchestrator/orchestrator.json', 'orchestrator/tls/key.pem', 'orchestrator/tls/cert.pem'];
+function startupNetworks(environment, kind) {
+  const n = runtimeNames(environment);
+  return [n.control, ...(environment === 'preprod' ? [names.data] : []), kind === 'orchestrator' ? n.network : monitorNames.network];
+}
+export async function assertRuntimeStartupResources(state, preprod, { inspectResource = inspect, readPrivate = readFile } = {}) {
+  const n = runtimeNames(state.environment);
+  assert.equal(state.phase, 'ready', 'runtime_not_provisioned');
+  for (const name of [n.control, n.network, monitorNames.network, ...(state.environment === 'preprod' ? [names.data] : [])]) {
+    const network = await inspectResource('network', name);
+    assert.ok(network, 'runtime_network_missing');
+    const runtime = name === n.control || name === n.network;
+    assert.ok(network.Labels?.[runtime ? runtimeLabel : preprodLabel] === (runtime ? state.installation : preprod.installation), 'runtime_resource_owner_mismatch');
+    assert.ok(network.Id && network.Internal === true && network.Driver === (runtime ? 'bridge' : 'overlay') &&
+      (runtime || network.Attachable === true), 'runtime_network_configuration_invalid');
+  }
+  const secret = await inspectResource('secret', n.metricsSecret);
+  assert.ok(secret, 'runtime_metrics_secret_missing');
+  assert.ok(secret.Spec?.Labels?.[runtimeLabel] === state.installation && secret.Spec?.Labels?.[preprodLabel] === preprod.installation,
+    'runtime_resource_owner_mismatch');
+  for (const path of runtimePrivateFiles) {
+    let content;
+    try { content = await readPrivate(join(base, state.environment, path)); }
+    catch (error) { if (error.code === 'ENOENT') throw new Error('runtime_private_config_missing'); throw error; }
+    assert.ok(content.length, 'runtime_private_config_missing');
+    if (path.endsWith('.json')) {
+      // Never expose private JSON or credentials in a parse/assertion diagnostic.
+      let config;
+      try { config = JSON.parse(content.toString()); } catch { throw new Error('runtime_private_config_invalid'); }
+      assert.ok(config?.BAIRUI_RUNTIME_DEPLOYMENT === state.environment && config?.BAIRUI_RUNTIME_INSTALLATION === state.installation,
+        'runtime_private_config_invalid');
+    }
+  }
+  // Reject an ownership conflict in either role before starting or upgrading either.
+  for (const kind of ['orchestrator', 'controller']) {
+    const item = await inspectResource('container', n[kind]);
+    if (item) assert.ok(item.Config?.Labels?.[runtimeLabel] === state.installation, 'runtime_resource_owner_mismatch');
+  }
+}
+export async function startRuntimeContainer(kind, state, { preprod, orchImage, rebuild = false },
+  { dockerCommand = docker, inspectResource = inspect, readPrivate = readFile } = {}) {
+  const n = runtimeNames(state.environment);
+  const args = runtimeContainerArguments(kind, { ...state, directory: join(base, state.environment).replaceAll('\\', '/'),
+    apiImage: apiImage(preprod.revision), orchestratorImage: orchImage });
+  args[0] = 'create'; args.splice(1, 1);
+  const expected = kind === 'controller' ? apiImage(preprod.revision) : orchImage;
+  const validate = () => assertRuntimeStartupResources(state, preprod, { inspectResource, readPrivate });
+  const current = async () => {
+    const item = await inspectResource('container', n[kind]);
+    if (item) {
+      assert.ok(item.Config?.Labels?.[runtimeLabel] === state.installation, 'runtime_resource_owner_mismatch');
+      assert.equal(item.Name, '/' + n[kind], 'runtime_container_name_mismatch');
+      assert.match(item.Id, /^[a-f0-9]{64}$/, 'runtime_container_id_invalid');
+    }
+    return item;
+  };
+  const create = async () => {
+    await dockerCommand(args);
+    const item = await current(); assert.ok(item, 'runtime_container_missing'); return item;
+  };
+  const attach = async item => {
+    for (const network of startupNetworks(state.environment, kind)) {
+      if (!item.NetworkSettings.Networks[network]) await dockerCommand(['network', 'connect', network, item.Id]);
+    }
+  };
+  await validate();
+  let item = await current();
+  if (item && (rebuild || item.Config.Image !== expected || item.HostConfig.Init !== true)) {
+    await dockerCommand(['stop', '--time', '30', item.Id]); await dockerCommand(['rm', item.Id]); item = null;
+  }
+  const reused = Boolean(item);
+  item ??= await create();
+  await attach(item);
+  if (item.State.Running) return item.Id;
+  const originalId = item.Id;
+  const recoverable = async error => {
+    // Persisted State.Error can describe an older attempt; require the current
+    // rejected Docker start to classify the same networking failure as well.
+    if (error.networkStartMissing !== true) throw error;
+    const failed = await current();
+    assert.ok(failed?.Id === originalId, 'runtime_container_changed');
+    if (failed.State.Running !== false || !['created', 'exited'].includes(failed.State.Status) ||
+      !/^failed to set up container networking:.*\bnetwork\b.*\bnot found\b/i.test(failed.State.Error ?? '')) throw error;
+    return failed;
+  };
+  try { await dockerCommand(['start', originalId]); }
+  catch (firstError) {
+    if (!reused) throw firstError;
+    await recoverable(firstError);
+    await validate();
+    try { await dockerCommand(['start', originalId]); }
+    catch (retryError) {
+      await recoverable(retryError);
+      await validate();
+      await recoverable(retryError);
+      // Docker rm has no force flag: a concurrent restart fails safely. Only this
+      // verified full ID is replaced; ledger, networks, Secrets and files persist.
+      await dockerCommand(['rm', originalId]);
+      item = await create(); await attach(item);
+      await dockerCommand(['start', item.Id]);
+      return item.Id;
+    }
+  }
+  return originalId;
+}
 export async function startRuntimeEnvironment(environment, { rebuild = false } = {}) {
   const state = await loadRuntimeState(environment), t = await target(environment), n = t.n;
   assert.equal(state?.phase, 'ready', 'runtime_not_provisioned');
   assert.equal(state.nodeId, t.preprod.nodeId); assert.equal(state.endpoint, t.preprod.endpoint);
-  assert.ok(await runtimeOwned('network', n.control, state), 'runtime_control_network_missing');
-  assert.ok(await runtimeOwned('network', n.network, state), 'runtime_network_missing');
-  assert.ok(await owned('secret', n.metricsSecret, t.preprod), 'runtime_metrics_secret_missing');
-  for (const path of ['controller/controller.json', 'controller/metrics-token', 'controller/tls/cert.pem', 'orchestrator/orchestrator.json', 'orchestrator/tls/key.pem']) {
-    assert.ok((await readFile(join(base, environment, path))).length, 'runtime_private_config_missing');
-  }
+  await assertRuntimeStartupResources(state, t.preprod);
   const orchImage = await buildRuntimeOrchestrator();
   for (const kind of ['orchestrator', 'controller']) {
-    let item = await runtimeOwned('container', n[kind], state);
-    const expected = kind === 'controller' ? apiImage(t.preprod.revision) : orchImage;
-    if (item && (rebuild || item.Config.Image !== expected || item.HostConfig.Init !== true)) {
-      await docker(['stop', '--time', '30', item.Id]); await docker(['rm', item.Id]); item = null;
-    }
-    if (!item) {
-      // Create stopped first, attach required networks, then start: no failed-first-boot race.
-      const args = runtimeContainerArguments(kind, { ...state, directory: join(base, environment).replaceAll('\\', '/'), apiImage: apiImage(t.preprod.revision), orchestratorImage: orchImage });
-      args[0] = 'create'; args.splice(1, 1);
-      await docker(args);
-    }
-    const current = await runtimeOwned('container', n[kind], state);
-    for (const network of [n.control, ...(environment === 'preprod' ? [names.data] : []), kind === 'orchestrator' ? n.network : monitorNames.network]) {
-      if (!current.NetworkSettings.Networks[network]) await docker(['network', 'connect', network, n[kind]]);
-    }
-    await docker(['start', n[kind]]);
+    await startRuntimeContainer(kind, state, { preprod: t.preprod, orchImage, rebuild });
     await waitUntil(async () => (await runtimeOwned('container', n[kind], state))?.State.Health?.Status === 'healthy', environment + ' ' + kind + '启动', 120000);
   }
   state.running = true; state.revision = t.preprod.revision; state.updatedAt = new Date().toISOString(); await save(state);

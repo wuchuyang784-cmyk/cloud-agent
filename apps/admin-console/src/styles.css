@@ -88,8 +88,12 @@ tbody tr:hover { background: #fafbfd; }
 .panel-state { min-height: 260px; background: #fff; border: 1px solid #e2e5eb; display: grid; place-items: center; color: #687382; }
 .panel-state.warning { color: #9d6111; }
 .monitor-shell { display: grid; gap: 12px; }
-.monitor-note { display: flex; flex-wrap: wrap; gap: 10px 18px; color: #687382; }
+.monitor-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid #e2e5eb; background: #fff; border-radius: 6px; }
+.monitor-note { display: grid; gap: 8px; color: #687382; flex: 1; min-width: 200px; }
 .monitor-note strong { color: #252b36; }
+.monitor-note small { color: #7b8290; }
+.monitor-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.monitor-actions a { display: inline-flex; align-items: center; min-height: 36px; padding: 8px 12px; border: 1px solid #dce0e6; border-radius: 4px; background: #f8faff; }
 .monitor-shell iframe { width: 100%; height: calc(100dvh - 210px); min-height: 560px; border: 1px solid #dce0e6; border-radius: 4px; background: #fff; }
 .section-note { color: #687382; margin: -8px 0 16px; }
 .access { min-height: 100dvh; display: grid; place-items: center; padding: 32px 24px; background: white; }
