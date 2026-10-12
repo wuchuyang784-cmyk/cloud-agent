@@ -71,3 +71,89 @@ test('scheduler: independent worker loop completes and shuts down', { timeout: 1
     assert.deepEqual(errors, []);
   } finally { controller.abort(); await work; }
 });
+test('scheduler: account governance cancels queued/running work and fences old workers', async () => {
+  let now = 1000;
+  const accounts = new Map([['a', { status: 'active', version: 0 }]]);
+  const s = new MemoryTaskStore({
+    clock: () => now,
+    governance: { get: userId => accounts.get(userId) ?? { status: 'active', version: 0 } },
+  });
+  const running = await s.submit(a, 'running', input);
+  const queued = await s.submit(a, 'queued', input);
+  const claim = await s.claim('old-worker');
+  const queuedId = claim.id === running.id ? queued.id : running.id;
+  assert.equal(queued.governanceVersion, 0);
+  assert.equal(claim.governanceVersion, 0);
+
+  accounts.set('a', { status: 'suspended', version: 1 });
+  assert.equal(await s.claim('replacement-worker'), null);
+  assert.equal((await s.get(a, queuedId)).status, 'cancelled');
+  assert.equal((await s.get(a, queuedId)).cancelReason, 'account_suspended');
+  assert.equal((await s.get(a, running.id)).status, 'cancelled');
+  assert.equal((await s.get(a, running.id)).cancelReason, 'account_suspended');
+  assert.ok((await s.get(a, running.id)).cancelledAt >= now);
+  assert.equal(await s.heartbeat(claim), false);
+  assert.equal(await s.finish(claim, 'succeeded'), false);
+  await assert.rejects(s.submit(a, 'blocked-suspended', input), /account_suspended/);
+
+  accounts.set('a', { status: 'banned', version: 2 });
+  await assert.rejects(s.submit(a, 'blocked-banned', input), /account_banned/);
+  now += 16000;
+  assert.equal(await s.claim('after-governance'), null);
+});
+
+test('scheduler: governance version fences a task even after account is restored', async () => {
+  let now = 1000;
+  const accounts = new Map([['a', { status: 'active', version: 0 }]]);
+  const s = new MemoryTaskStore({
+    clock: () => now,
+    governance: { get: userId => accounts.get(userId) ?? { status: 'active', version: 0 } },
+  });
+  const task = await s.submit(a, 'version-fence', input);
+  accounts.set('a', { status: 'suspended', version: 1 });
+  accounts.set('a', { status: 'active', version: 2 });
+  assert.equal(await s.claim('worker'), null);
+  const cancelled = await s.get(a, task.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.cancelReason, 'governance_changed');
+  assert.equal(cancelled.governanceVersion, 0);
+});
+
+for (const status of ['suspended', 'banned', 'active']) {
+  test(`scheduler: governance takes precedence over the final expired lease (${status})`, async () => {
+    let now = 1000, account = { status: 'active', version: 0 };
+    const store = new MemoryTaskStore({ clock: () => now, governance: { get: () => account } });
+    const task = await store.submit(a, 'final-lease', input);
+    let claim;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      claim = await store.claim('worker');
+      assert.equal(claim.attempt, attempt);
+      now += 16000;
+    }
+    account = { status, version: status === 'active' ? 2 : 1 };
+    assert.equal(await store.finish(claim, 'succeeded'), false);
+    const cancelled = await store.get(a, task.id);
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal(cancelled.cancelReason, status === 'active' ? 'governance_changed' : `account_${status}`);
+    assert.equal(cancelled.cancelledAt, now);
+    assert.equal(cancelled.workerId, null);
+    assert.equal(cancelled.leaseUntil, null);
+  });
+}
+
+test('scheduler: unavailable governance rolls back lease recovery and permits a safe retry', async () => {
+  let now = 1000, unavailable = false;
+  const store = new MemoryTaskStore({ clock: () => now, governance: { get: () => {
+    if (unavailable) throw new Error('offline');
+    return { status: 'active', version: 0 };
+  } } });
+  const task = await store.submit(a, 'unavailable', input);
+  for (let i = 0; i < 3; i++) { await store.claim('worker'); now += 16000; }
+  const before = await store.get(a, task.id);
+  unavailable = true;
+  await assert.rejects(store.claim('replacement'), /governance_unavailable/);
+  assert.deepEqual(await store.get(a, task.id), before);
+  unavailable = false;
+  assert.equal(await store.claim('replacement'), null);
+  assert.equal((await store.get(a, task.id)).status, 'failed');
+});

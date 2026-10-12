@@ -8,7 +8,7 @@ test('admin: uncertain rollback discards the pooled connection', async () => {
   const failure = new Error('query_failure');
   const rollback = new Error('rollback_failure');
   let released;
-  const client = { async query(sql) { if (sql.startsWith('SELECT')) throw failure; if (sql === 'ROLLBACK') throw rollback; }, release(error) { released = error; } };
+  const client = { async query(sql) { if (sql.includes('platform_account_access')) return { rows: [{ result: { status: 'active', version: 0 } }] }; if (sql.startsWith('SELECT')) throw failure; if (sql === 'ROLLBACK') throw rollback; }, release(error) { released = error; } };
   await assert.rejects(readAdmin({ pool: { async connect() { return client; } } }, 'actor', 'users'), error => error === failure);
   assert.equal(released, rollback);
 });

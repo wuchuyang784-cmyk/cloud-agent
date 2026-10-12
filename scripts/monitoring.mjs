@@ -8,13 +8,27 @@ import { docker, owned, loadState, saveState, localDocker, checkResources, outpu
 import { label, names, apiImage } from './preprod-config.mjs';
 import { monitoringStack, monitoringAssets, monitorNames, monitorVolumes, monitorSecrets, monitorServices, monitorImages, monitorConfigName, monitoringRevision, monitorOrigin } from './monitoring-config.mjs';
 import { validateMonitoring } from './monitoring-rules.test.mjs';
+import { runWithKeepAlive } from './cli-keepalive.mjs';
+import { runtimeNames } from './runtime-deployment-config.mjs';
 
 // Monitoring shares the installation lock and never consumes the business .env.
+export function monitoringServiceReady(service, rows, expectedImage) {
+  const update = service?.UpdateStatus?.State;
+  if (update && update !== 'completed') return false;
+  return rows.length === 1 && rows[0].State.Health?.Status === 'healthy' && rows[0].Config.Image === expectedImage;
+}
+
 export async function assertMonitoringResources(state, { requirePersistent = true } = {}) {
   const found = {};
   for (const [kind, resources] of Object.entries({ service: monitorServices.map(key => monitorNames[key]), network: [monitorNames.network], volume: monitorVolumes, secret: monitorSecrets,
-    config: Object.keys(monitoringAssets()).map(monitorConfigName) })) {
+    config: Object.keys(monitoringAssets(state.monitoring?.runtime)).map(n => monitorConfigName(n, state.monitoring?.runtime)) })) {
     for (const name of resources) found[name] = await owned(kind, name, state);
+  }
+  if (state.monitoring?.runtime?.enabled) {
+    for (const environment of state.monitoring.runtime.environments) {
+      const name = runtimeNames(environment).metricsSecret;
+      if (!await owned('secret', name, state)) throw new Error('Runtime 指标 Secret 缺失：' + name);
+    }
   }
   const network = found[monitorNames.network];
   if (network && (network.Driver !== 'overlay' || !network.Attachable || !network.Internal)) throw new Error('monitoring_network_configuration_invalid');
@@ -57,8 +71,8 @@ export async function ensureMonitoringResources(state) {
 
 export async function deployMonitoring(state) {
   await assertMonitoringResources(state);
-  for (const [name, asset] of Object.entries(monitoringAssets())) {
-    const target = monitorConfigName(name);
+  for (const [name, asset] of Object.entries(monitoringAssets(state.monitoring?.runtime))) {
+    const target = monitorConfigName(name, state.monitoring?.runtime);
     if (!await owned('config', target, state)) await docker(['config', 'create', '--label', label + '=' + state.installation, target, '-'], { input: JSON.stringify(asset) });
   }
   const path = join(output, 'monitoring-stack.json');
@@ -68,13 +82,15 @@ export async function deployMonitoring(state) {
   await waitUntil(async () => {
     for (const key of monitorServices) {
       const rows = await containers(monitorNames[key], state);
-      if (rows.length !== 1 || rows[0].State.Health?.Status !== 'healthy') return false;
+      const service = await owned('service', monitorNames[key], state);
+      const expectedImage = key === 'receiver' ? apiImage(state.revision) : monitorImages[key];
+      if (!monitoringServiceReady(service, rows, expectedImage)) return false;
     }
     return true;
   }, '四项监控服务启动', 240000);
-  const health = await request(monitorOrigin + '/api/health');
-  if (health.status !== 200 || JSON.parse(health.text).database !== 'ok') throw new Error('Grafana HTTPS 健康检查失败。');
-  state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision();
+  const health = await request(monitorOrigin + '/login');
+  if (health.status !== 200 || !health.text.includes('Grafana')) throw new Error('Grafana HTTPS 应急入口健康检查失败。');
+  state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision(state.monitoring?.runtime);
   await saveState(state);
 }
 
@@ -88,13 +104,23 @@ async function context() {
   return state;
 }
 
+export async function ensureMonitoringImages() {
+  for (const image of Object.values(monitorImages)) {
+    try {
+      await docker(['image', 'inspect', image]);
+      console.log('使用本地固定监控镜像：' + image);
+    } catch (error) {
+      if (!error.notFound) throw error;
+      console.log('准备固定监控镜像：' + image);
+      await docker(['pull', image], { timeout: 600000, logFile: join(output, 'pull-' + image.split('/')[1].replace(':', '-') + '.log') });
+    }
+  }
+}
 export async function monitorUp() {
   const state = await context();
   await assertMonitoringResources(state, { requirePersistent: Boolean(state.monitoring?.resourcesReady) });
-  for (const image of Object.values(monitorImages)) {
-    console.log('准备固定监控镜像：' + image);
-    await docker(['pull', image], { timeout: 600000, logFile: join(output, 'pull-' + image.split('/')[1].replace(':', '-') + '.log') });
-  }
+  await ensureMonitoringImages();
+
   await validateMonitoring();
   await ensureMonitoringResources(state);
   state.monitoring.enabled = true;
@@ -172,5 +198,7 @@ async function monitorPassword() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const action = { up: monitorUp, status: monitorStatus, stop: monitorStop, alerts: monitorAlerts, password: monitorPassword }[process.argv[2]];
   if (!action) { console.error('用法：node scripts/monitoring.mjs up|status|stop|alerts|password'); process.exitCode = 1; }
-  else await withLock(action).catch(error => { console.error(error.message); process.exitCode = 1; });
+  // preprod.up dynamically imports monitoring again; do not hold module evaluation
+  // open while that action runs. Keep-alive still waits for completion and cleanup.
+  else runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

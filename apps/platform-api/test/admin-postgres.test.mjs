@@ -29,6 +29,7 @@ test('admin PostgreSQL: real sessions, two APIs, restricted role, no self-promot
     }
     await owner.query('GRANT USAGE ON SCHEMA ' + schema + ' TO ' + role);
     await owner.query('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ' + schema + ' TO ' + role);
+    await elevated.query('GRANT EXECUTE ON FUNCTION platform_account_access(text),platform_account_session_allowed(text),platform_governance_accounts(text,text[]) TO ' + role);
     pool = new Pool({ connectionString, options: '-c search_path=' + schema + ',public -c role=' + role });
     for (let i = 0; i < 2; i++) {
       const app = createApp({ env, store: new PostgresStore({ pool }) });

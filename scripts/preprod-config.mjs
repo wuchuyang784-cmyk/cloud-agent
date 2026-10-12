@@ -56,7 +56,8 @@ export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHas
           BAIRUI_SECRET_FILE: '/run/secrets/platform-env', BETTER_AUTH_URL: origin,
           BAIRUI_TRUSTED_PROXIES: proxyIp + '/32', BAIRUI_SIMULATION_ENABLED: '0',
           BAIRUI_DB_POOL_MAX: '10', BAIRUI_DB_CONNECT_TIMEOUT_MS: '2000', BAIRUI_DB_QUERY_TIMEOUT_MS: '5000',
-          ...(monitoring?.enabled ? { BAIRUI_METRICS_ENABLED: '1', BAIRUI_METRICS_PORT: '9464', BAIRUI_METRICS_TOKEN_FILE: '/run/secrets/metrics-token' } : {}),
+          ...(monitoring?.enabled ? { BAIRUI_METRICS_ENABLED: '1', BAIRUI_METRICS_PORT: '9464', BAIRUI_METRICS_TOKEN_FILE: '/run/secrets/metrics-token',
+            BAIRUI_PROMETHEUS_URL: 'http://' + monitorNames.prometheus + ':9090' } : {}),
         },
         secrets: [{ source: 'platform_env', target: 'platform-env', uid: '1000', gid: '1000', mode: 256 },
           ...(monitoring?.enabled ? [{ source: 'metrics_token', target: 'metrics-token', uid: '1000', gid: '1000', mode: 256 }] : [])],
@@ -179,10 +180,67 @@ ${monitoring?.enabled ? `https://localhost:9443 {
   header {
     X-Content-Type-Options nosniff
     Referrer-Policy same-origin
+    Content-Security-Policy "frame-ancestors https://localhost:8443"
     -Server
   }
+  request_header -X-Bairui-Monitor-User
+  request_header -X-Bairui-Monitor-Role
+  @emergencyLogin path /login /login/* /logout
+  handle @emergencyLogin {
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
+      header_up -X-Bairui-Monitor-User
+    }
+  }
+  @emergencyPublic path /public/* /robots.txt /favicon.ico
+  handle @emergencyPublic {
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
+      header_up -X-Bairui-Monitor-User
+      header_up -X-Bairui-Monitor-Role
+      header_up -Cookie
+      header_up -Authorization
+      header_down -Set-Cookie
+    }
+  }
+  @emergencySession header_regexp grafanaSession Cookie "(?i)(^|;\\s*)grafana_session="
+  handle @emergencySession {
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
+      header_up -X-Bairui-Monitor-User
+    }
+  }
   handle {
-    reverse_proxy ${monitorNames.grafana}:3000 {
+    forward_auth {
+      uri /api/admin/monitoring/access
+      copy_headers X-Bairui-Monitor-User X-Bairui-Monitor-Role
+      dynamic a {
+        name tasks.${names.api}
+        port 8080
+        refresh 2s
+      }
+    }
+    reverse_proxy {
+      dynamic a {
+        name tasks.${monitorNames.grafana}
+        port 3000
+        refresh 2s
+      }
+      header_up -Cookie
+      header_up -Authorization
+      header_down -Set-Cookie
       transport http {
         dial_timeout 2s
         response_header_timeout 20s
@@ -205,9 +263,14 @@ GRANT CONNECT ON DATABASE bairui_preprod TO bairui_preprod_app;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO bairui_preprod_app;
 GRANT EXECUTE ON FUNCTION public.platform_admin_read(text,text,text,text,integer,text,text) TO bairui_preprod_app;
+GRANT EXECUTE ON FUNCTION public.platform_infrastructure_read(text) TO bairui_preprod_app;
+GRANT EXECUTE ON FUNCTION public.platform_account_access(text), public.platform_scheduler_account_access(text), public.platform_account_session_allowed(text), public.platform_governance_accounts(text,text[]), public.platform_governance_read(text,text,bigint), public.platform_governance_change(text,text,text,integer,text,uuid) TO bairui_preprod_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bairui_preprod_app;
 REVOKE ALL ON TABLE public.platform_role_bindings, public.platform_admin_audit FROM bairui_preprod_app;
+REVOKE ALL ON TABLE public.platform_infrastructure_sources, public.platform_infrastructure_snapshots FROM bairui_preprod_app;
+REVOKE ALL ON TABLE public.platform_account_governance, public.platform_governance_audit FROM bairui_preprod_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bairui_preprod_app;
+REVOKE ALL ON SEQUENCE public.platform_governance_audit_id_seq FROM bairui_preprod_app;
 ALTER ROLE bairui_preprod_app SET statement_timeout = '10s';
 ALTER ROLE bairui_preprod_app SET lock_timeout = '3s';
 ALTER ROLE bairui_preprod_app SET idle_in_transaction_session_timeout = '15s';

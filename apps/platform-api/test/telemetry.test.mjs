@@ -52,6 +52,18 @@ test('metrics default to disabled without opening a listener or reading a token 
   await app.platform.telemetry.close();
 });
 
+test('explicit host monitoring registers actual memory gauges without host names or container-limit substitution', async t => {
+  const normal = await fixture(t);
+  assert.equal(await metric(normal.app, 'bairui_host_memory_total_bytes'), undefined);
+  const enabled = await fixture(t, { env: { BAIRUI_HOST_METRICS_ENABLED: '1' } });
+  const total = await metric(enabled.app, 'bairui_host_memory_total_bytes');
+  const used = await metric(enabled.app, 'bairui_host_memory_used_bytes');
+  assert.ok(total.values[0].value > 0 && used.values[0].value > 0 && used.values[0].value <= total.values[0].value);
+  assert.deepEqual(total.values[0].labels, {});
+  const cpu = await metric(enabled.app, 'bairui_host_cpu_usage_ratio');
+  assert.ok(cpu.values[0].value >= 0 && cpu.values[0].value <= 1 || Number.isNaN(cpu.values[0].value));
+});
+
 test('enabled metrics fail closed for absent, weak, malformed and oversized tokens and invalid ports', async t => {
   for (const value of ['', 'short', 'x'.repeat(64), '01234567'.repeat(8), 'has whitespace '.repeat(5), 'a'.repeat(4096)]) {
     const { path } = await tokenFile(t, value);

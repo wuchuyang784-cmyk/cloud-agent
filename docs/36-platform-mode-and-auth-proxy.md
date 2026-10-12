@@ -72,11 +72,11 @@ npm run dev
 
 默认启动 platform-api 与 console-mvp，不再启动旧 Agent Worker 和 Runtime。
 只启动后端可以执行 npm run dev:api，只启动前端使用 npm run dev:web。
-浏览器使用原 BETTER_AUTH_URL 对应的地址；localhost 与 127.0.0.1 不要混用。
+浏览器使用原 BETTER_AUTH_URL 对应的地址；本地新环境默认打开 `http://localhost:5173/`，localhost 与 127.0.0.1 不要混用。
 
-前端默认固定监听 `127.0.0.1:5173`，与启动脚本提示保持一致；5173 已被占用时直接报错，不自动换端口。
-如果旧版本显示启动成功，但访问 `127.0.0.1:5173` 出现 `ERR_CONNECTION_REFUSED`，可能是前端只监听了 IPv6 的 `::1`。
-更新后重新启动即可应用固定监听地址，不需要修改数据库、账号或认证密钥，也不要为此开放局域网监听。
+前端进程仍固定监听本机回环地址 `127.0.0.1:5173`，启动脚本向浏览器提示 `localhost`；5173 已被占用时直接报错，不自动换端口。
+如果旧版本显示启动成功，但访问 `localhost:5173` 出现 `ERR_CONNECTION_REFUSED`，请检查本机 hosts/DNS 是否将 localhost 解析到回环地址；更新后重新启动即可应用固定监听地址。
+不需要修改数据库、账号或认证密钥，也不要为此开放局域网监听。
 
 5. 验证（API 使用默认 8080 时）：
 

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocker, names, label, origin, apiImage, webImage, bootstrapName, missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
 import { monitorNames } from './monitoring-config.mjs';
+import { runWithKeepAlive } from './cli-keepalive.mjs';
 
 // This entry point deliberately never loads .env or accepts a database URL.
 export const root = fileURLToPath(new URL('../', import.meta.url));
@@ -16,14 +17,19 @@ export const paths = { state: join(output, 'state.json'), ca: join(output, 'root
 const childEnv = { ...process.env };
 for (const key of Object.keys(childEnv)) if (/^(BAIRUI_|BETTER_AUTH_|DATABASE_URL$|POSTGRES_|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$)/.test(key)) delete childEnv[key];
 
+export function dockerCommandFailure(args, stderr, { logFile } = {}) {
+  const safe = new Error('Docker 命令失败：' + args.slice(0, 2).join(' ') + (logFile ? '，请检查 ' + logFile : '（详细诊断请查看对应服务状态）'));
+  safe.notFound = missingDockerObject(stderr);
+  // Keep only a boolean from this failed command, never raw daemon diagnostics.
+  safe.networkStartMissing = args[0] === 'start' && /failed to set up container networking:.*\bnetwork\b.*\bnot found\b/i.test(stderr);
+  return safe;
+}
 export async function docker(args, { input, timeout = 120000, logFile, includeStderr = false } = {}) {
   return new Promise((resolveResult, reject) => {
     const child = execFile('docker', args, { cwd: root, env: childEnv, windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024 }, async (error, stdout, stderr) => {
       if (logFile) await writeFile(logFile, stdout + '\n' + stderr).catch(() => {});
       if (!error) return resolveResult((stdout + (includeStderr ? '\n' + stderr : '')).trim());
-      const safe = new Error('Docker 命令失败：' + args.slice(0, 2).join(' ') + (logFile ? '，请检查 ' + logFile : '（详细诊断请查看对应服务状态）'));
-      safe.notFound = missingDockerObject(stderr);
-      reject(safe);
+      reject(dockerCommandFailure(args, stderr, { logFile }));
     });
     child.stdin.on('error', () => {});
     child.stdin.end(input);
@@ -137,6 +143,11 @@ async function migrations() {
   for (const name of (await readdir(dir)).filter(n => n.endsWith('.sql')).sort()) files.push({ name, sql: await readFile(join(dir, name), 'utf8') });
   return { files, hash: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
 }
+export const revisionDirectories = ['apps/platform-api/src', 'apps/console-mvp/src', 'apps/console-mvp/public', 'apps/admin-console/src', 'infra/preprod'];
+export const revisionFiles = ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
+  ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f),
+  ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)];
+
 async function revision(state) {
   const hash = createHash('sha256').update(gatewayConfig(state));
   async function add(path) {
@@ -148,9 +159,8 @@ async function revision(state) {
       else if (entry.isFile()) hash.update(child).update(await readFile(join(root, child)));
     }
   }
-  for (const dir of ['apps/platform-api/src', 'apps/console-mvp/src', 'apps/console-mvp/public', 'infra/preprod']) await add(dir);
-  for (const file of ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
-    ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f)]) hash.update(file).update(await readFile(join(root, file)));
+  for (const dir of revisionDirectories) await add(dir);
+  for (const file of revisionFiles) hash.update(file).update(await readFile(join(root, file)));
   return hash.digest('hex').slice(0, 16);
 }
 
@@ -205,6 +215,7 @@ export async function up() {
     }
   }
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).assertMonitoringResources(state);
+  if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).assertRuntimeResources('preprod', state);
   let gateway = await owned('container', names.gateway, state);
   if (!gateway?.State.Running) await freePort();
   if (state.monitoring?.enabled && (!gateway?.State.Running || !gateway.HostConfig?.PortBindings?.['9443/tcp'])) await freePort(9443);
@@ -229,13 +240,14 @@ export async function up() {
   if (!await owned('config', configName, state)) await docker(['config', 'create', '--label', label + '=' + state.installation, configName, '-'], { input: bootstrapSql(schema.files, schema.hash) });
   if (!gateway || !gateway.State.Running || gateway.Config.Image !== webImage(rev)) {
     await pauseApi(state);
-    if (gateway && gateway.Config.Image !== webImage(rev)) {
-      await docker(['container', 'stop', '--time', '15', names.gateway]);
+    // Recreate stopped gateways: Docker may have deactivated their local overlay
+    // endpoint. Keep the certificate volume and resolve the new proxy IP below.
+    if (gateway) {
+      if (gateway.State.Running) await docker(['container', 'stop', '--time', '15', names.gateway]);
       await docker(['container', 'rm', names.gateway]);
       gateway = null;
     }
-    if (gateway) await docker(['container', 'start', names.gateway]);
-    else await docker(['run', '-d', '--name', names.gateway, '--label', label + '=' + state.installation,
+    await docker(['run', '-d', '--name', names.gateway, '--label', label + '=' + state.installation,
       '--restart', 'unless-stopped', '--network', names.edge, '--memory', '128m', '--cpus', '0.25',
       '--read-only', '--cap-drop', 'ALL', '--cap-add', 'NET_BIND_SERVICE', '--security-opt', 'no-new-privileges:true',
       '--tmpfs', '/config:rw,noexec,nosuid,size=8m', '--tmpfs', '/tmp:rw,noexec,nosuid,size=8m',
@@ -247,6 +259,11 @@ export async function up() {
   if (state.monitoring?.enabled && !gateway.NetworkSettings.Networks[monitorNames.network]) {
     await docker(['network', 'connect', monitorNames.network, names.gateway]);
     gateway = await owned('container', names.gateway, state);
+  }
+  if (state.monitoring?.enabled) {
+    const gatewayIp = gateway.NetworkSettings.Networks[monitorNames.network]?.IPAddress;
+    if (!gatewayIp) throw new Error('监控网关缺少精确内部地址。');
+    state.monitoring.gatewayIp = gatewayIp;
   }
   const proxyIp = gateway.NetworkSettings.Networks[names.edge]?.IPAddress;
   const stack = stackConfig({ ...state, proxyIp, revision: rev });
@@ -272,6 +289,7 @@ export async function up() {
   state.certificateFingerprint = new X509Certificate(cert).fingerprint256;
   state.updatedAt = new Date().toISOString();
   await saveState(state);
+  if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).startRuntimeEnvironment('preprod');
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).deployMonitoring(state);
   console.log('预发已就绪：' + origin + '，双 API / 独立 bairui_preprod。');
   console.log('公开 CA 证书：' + paths.ca + '；未修改 Windows 信任。');
@@ -300,6 +318,7 @@ export async function stop() {
   const local = await localDocker();
   if (local.nodeId !== state.nodeId || local.endpoint !== state.endpoint) throw new Error('当前 Docker 不是记录的预发节点。');
   await checkResources(state);
+  if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).stopRuntimeEnvironment('preprod');
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).stopMonitoringServices(state);
   if (await owned('container', names.gateway, state)) await docker(['container', 'stop', '--time', '15', names.gateway]);
   await pauseApi(state);
@@ -315,5 +334,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const command = process.argv[2];
   const action = { up, status, stop }[command];
   if (!action) { console.error('用法：node scripts/preprod.mjs up|status|stop'); process.exitCode = 1; }
-  else await withLock(action).catch(error => { console.error(error.message); process.exitCode = 1; });
+  // Let this module finish evaluation before an action dynamically imports monitoring,
+  // whose dependency graph imports this module back. Keep-alive owns process lifetime.
+  else runWithKeepAlive(() => withLock(action)).catch(error => { console.error(error.message); process.exitCode = 1; });
 }

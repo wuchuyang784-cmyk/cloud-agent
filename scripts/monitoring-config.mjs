@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { isIP } from 'node:net';
+import { runtimeRules } from './runtime-monitoring-config.mjs';
+import { runtimeNames } from './runtime-deployment-config.mjs';
 
 export const monitorOrigin = 'https://localhost:9443';
 export const monitorNames = Object.freeze({
@@ -18,7 +21,15 @@ export const monitorServices = ['prometheus', 'grafana', 'alertmanager', 'receiv
 export const monitorVolumes = [monitorNames.promVolume, monitorNames.grafanaVolume, monitorNames.alertVolume, monitorNames.receiverVolume];
 export const monitorSecrets = [monitorNames.metricsSecret, monitorNames.alertSecret, monitorNames.grafanaSecret];
 
-export function monitoringAssets() {
+function runtimeEnvironments(runtime) {
+  if (!runtime?.enabled) return [];
+  assert.ok(Array.isArray(runtime.environments) && runtime.environments.length > 0 && runtime.environments.length <= 2);
+  assert.equal(new Set(runtime.environments).size, runtime.environments.length);
+  for (const env of runtime.environments) runtimeNames(env);
+  return [...runtime.environments].sort();
+}
+export function monitoringAssets(runtime) {
+  const environments = runtimeEnvironments(runtime);
   const rule = (alert, expr, duration = '1m', severity = 'warning') => ({ alert, expr, for: duration, labels: { severity } });
   const traffic = 'bairui_http_requests_total{job="bairui-api",route!~"/(livez|readyz|healthz)"}';
   const errorRate = 'sum(rate(bairui_http_requests_total{job="bairui-api",status=~"5..",route!~"/(livez|readyz|healthz)"}[5m])) / clamp_min(sum(rate(' + traffic + '[5m])), 0.001)';
@@ -46,6 +57,15 @@ export function monitoringAssets() {
       staticJob('grafana', monitorNames.grafana + ':3000'),
     ],
   };
+  if (environments.length) {
+    rules.groups.push(...runtimeRules().groups);
+    for (const environment of environments) prometheus.scrape_configs.push({
+      ...staticJob('bairui-runtime-' + environment, runtimeNames(environment).controller + ':9495'),
+      authorization: { type: 'Bearer', credentials_file: '/run/secrets/runtime-' + environment + '-metrics' },
+      relabel_configs: [{ target_label: 'job', replacement: 'bairui-runtime-controller' }],
+      sample_limit: 100, label_limit: 12, label_value_length_limit: 128, body_size_limit: '128KB',
+    });
+  }
   const alertmanager = {
     global: { resolve_timeout: '1m' },
     route: { receiver: 'local', group_by: ['alertname'], group_wait: '5s', group_interval: '15s', repeat_interval: '1h' },
@@ -84,11 +104,13 @@ export function monitoringAssets() {
   };
 }
 
-export const monitoringRevision = () => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(), images: monitorImages })).digest('hex').slice(0, 16);
-export const monitorConfigName = name => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision();
+export const monitoringRevision = runtime => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(runtime), images: monitorImages })).digest('hex').slice(0, 16);
+export const monitorConfigName = (name, runtime) => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision(runtime);
 
-export function monitoringStack({ installation, nodeId, revision }) {
+export function monitoringStack({ installation, nodeId, revision, monitoring }) {
+  const environments = runtimeEnvironments(monitoring?.runtime);
   assert.match(installation, /^[a-f0-9]{24}$/); assert.match(nodeId, /^[a-z0-9-]+$/); assert.match(revision, /^[a-f0-9]{16}$/);
+  assert.ok(isIP(monitoring?.gatewayIp) === 4 && !/^(0|127|169|224|255)\./.test(monitoring.gatewayIp), 'exact_monitor_gateway_ip_required');
   const labels = { 'bairui.preprod.installation': installation };
   const service = (image, user, memory, cpu) => ({ image, user, read_only: true, cap_drop: ['ALL'], labels,
     networks: ['monitor'], logging: { driver: 'json-file', options: { 'max-size': '5m', 'max-file': '3' } },
@@ -105,7 +127,7 @@ export function monitoringStack({ installation, nodeId, revision }) {
       prometheus: { ...service(monitorImages.prometheus, '65534:65534', '512M', '0.50'),
         command: ['--config.file=/etc/bairui/prometheus.json', '--storage.tsdb.path=/prometheus', '--storage.tsdb.retention.time=7d', '--storage.tsdb.retention.size=1GB', '--query.max-concurrency=4', '--query.timeout=15s'],
         volumes: ['promdata:/prometheus'], configs: [config('prometheus.json', '/etc/bairui/prometheus.json'), config('rules.json', '/etc/bairui/rules.json')],
-        secrets: [secret('metrics_token', 'metrics-token', '65534')], healthcheck: health(9090, '/-/ready'),
+        secrets: [secret('metrics_token', 'metrics-token', '65534'), ...environments.map(e => secret('runtime_' + e + '_metrics', 'runtime-' + e + '-metrics', '65534'))], healthcheck: health(9090, '/-/ready'),
       },
       alertmanager: { ...service(monitorImages.alertmanager, '65534:65534', '128M', '0.20'),
         command: ['--config.file=/etc/bairui/alertmanager.json', '--storage.path=/alertmanager', '--cluster.listen-address=', '--data.retention=168h'],
@@ -115,6 +137,11 @@ export function monitoringStack({ installation, nodeId, revision }) {
       grafana: { ...service(monitorImages.grafana, '472:472', '384M', '0.50'),
         environment: { GF_SERVER_ROOT_URL: monitorOrigin, GF_SECURITY_ADMIN_USER: 'admin', GF_SECURITY_ADMIN_PASSWORD__FILE: '/run/secrets/grafana-password',
           GF_SECURITY_COOKIE_SECURE: 'true', GF_SECURITY_COOKIE_SAMESITE: 'strict', GF_AUTH_ANONYMOUS_ENABLED: 'false', GF_USERS_ALLOW_SIGN_UP: 'false',
+          GF_AUTH_PROXY_ENABLED: 'true', GF_AUTH_PROXY_HEADER_NAME: 'X-Bairui-Monitor-User', GF_AUTH_PROXY_HEADER_PROPERTY: 'username',
+          GF_AUTH_PROXY_AUTO_SIGN_UP: 'true', GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN: 'false', GF_USERS_AUTO_ASSIGN_ORG_ROLE: 'Viewer',
+          GF_AUTH_PROXY_HEADERS: 'Role:X-Bairui-Monitor-Role', GF_AUTH_PROXY_SYNC_TTL: '0',
+          GF_AUTH_PROXY_WHITELIST: monitoring.gatewayIp,
+          GF_SECURITY_ALLOW_EMBEDDING: 'true',
           GF_ANALYTICS_REPORTING_ENABLED: 'false', GF_ANALYTICS_CHECK_FOR_UPDATES: 'false', GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false',
           GF_PLUGINS_PREINSTALL_DISABLED: 'true', GF_PLUGINS_PLUGIN_ADMIN_ENABLED: 'false', GF_SNAPSHOTS_EXTERNAL_ENABLED: 'false',
           GF_NEWS_NEWS_FEED_ENABLED: 'false', GF_UNIFIED_ALERTING_ENABLED: 'false', GF_LOG_MODE: 'console', GF_LOG_LEVEL: 'warn', GF_METRICS_ENABLED: 'true',
@@ -133,7 +160,8 @@ export function monitoringStack({ installation, nodeId, revision }) {
     },
     networks: { monitor: { external: { name: monitorNames.network } } },
     volumes: { promdata: { external: { name: monitorNames.promVolume } }, grafanadata: { external: { name: monitorNames.grafanaVolume } }, alertdata: { external: { name: monitorNames.alertVolume } }, receipts: { external: { name: monitorNames.receiverVolume } } },
-    secrets: { metrics_token: { external: { name: monitorNames.metricsSecret } }, alert_token: { external: { name: monitorNames.alertSecret } }, grafana_password: { external: { name: monitorNames.grafanaSecret } } },
-    configs: Object.fromEntries(Object.keys(monitoringAssets()).map(name => [name, { external: { name: monitorConfigName(name) } }])),
+    secrets: { metrics_token: { external: { name: monitorNames.metricsSecret } }, alert_token: { external: { name: monitorNames.alertSecret } }, grafana_password: { external: { name: monitorNames.grafanaSecret } },
+      ...Object.fromEntries(environments.map(e => ['runtime_' + e + '_metrics', { external: { name: runtimeNames(e).metricsSecret } }])) },
+    configs: Object.fromEntries(Object.keys(monitoringAssets(monitoring?.runtime)).map(name => [name, { external: { name: monitorConfigName(name, monitoring?.runtime) } }])),
   };
 }

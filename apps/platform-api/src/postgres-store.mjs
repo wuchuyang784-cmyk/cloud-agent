@@ -476,7 +476,7 @@ export class PostgresStore {
     try {
       await c.query('BEGIN');
       await c.query(`SELECT set_config('app.worker_id', $1, true)`, [workerId]);
-      const r = await c.query(`WITH candidates AS (SELECT id FROM control_outbox WHERE (status = 'queued' AND available_at <= now()) OR (status = 'leased' AND lease_until < now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE control_outbox o SET status = 'leased', leased_by = $2, lease_until = now() + interval '60 seconds', attempts = attempts + 1, updated_at = now() FROM candidates x WHERE o.id = x.id RETURNING o.*`, [limit, workerId]);
+      const r = await c.query(`WITH candidates AS (SELECT id FROM control_outbox WHERE event_type = 'agent.provision' AND ((status = 'queued' AND available_at <= now()) OR (status = 'leased' AND lease_until < now())) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE control_outbox o SET status = 'leased', leased_by = $2, lease_until = now() + interval '60 seconds', attempts = attempts + 1, updated_at = now() FROM candidates x WHERE o.id = x.id RETURNING o.*`, [limit, workerId]);
       await c.query('COMMIT'); return r.rows;
     } catch (error) { releaseError = await rollbackForRelease(c); throw error; } finally { c.release(releaseError); }
   }

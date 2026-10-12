@@ -25,7 +25,7 @@ for (const [name, run] of operations) {
       const client = {
         async query(sql) {
           queries.push(sql);
-          if (sql === 'BEGIN') return { rows: [] };
+          if (sql === 'BEGIN' || sql === 'BEGIN ISOLATION LEVEL READ COMMITTED') return { rows: [] };
           if (sql === 'ROLLBACK') {
             if (failedRollback) throw rollbackError;
             return { rows: [] };

@@ -3,11 +3,30 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { monitoringStack, monitoringAssets, monitorNames, monitorImages, monitorOrigin } from './monitoring-config.mjs';
 import { stackConfig, gatewayConfig } from './preprod-config.mjs';
+import { monitoringRevision } from './monitoring-config.mjs';
 
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
+const monitorInput = { ...input, monitoring: { enabled: true, gatewayIp: '10.0.3.9' } };
+
+test('managed runtime monitoring is opt-in and uses separate fixed environment targets', () => {
+  const runtime = { enabled: true, environments: ['business', 'preprod'] };
+  const assets = monitoringAssets(runtime);
+  assert.equal(assets['rules.json'].groups.flatMap(g => g.rules).filter(r => r.alert.startsWith('Runtime')).length, 5);
+  const jobs = assets['prometheus.json'].scrape_configs.filter(j => j.job_name.startsWith('bairui-runtime-'));
+  assert.equal(jobs.length, 2);
+  assert.deepEqual(jobs.map(j => j.static_configs[0].targets[0]), ['bairui-runtime-business-controller:9495', 'bairui-runtime-preprod-controller:9495']);
+  assert.ok(jobs.every(j => j.relabel_configs[0].replacement === 'bairui-runtime-controller'));
+  assert.notEqual(jobs[0].authorization.credentials_file, jobs[1].authorization.credentials_file);
+  // Separate jobs are relabelled into the fixed selector, each with its own token.
+  const secrets = monitoringStack({ ...monitorInput, monitoring: { ...monitorInput.monitoring, runtime } }).secrets;
+  assert.ok(secrets.runtime_business_metrics && secrets.runtime_preprod_metrics);
+  assert.notEqual(monitoringRevision(runtime), monitoringRevision());
+  assert.equal(monitoringAssets()['prometheus.json'].scrape_configs.some(j => j.job_name.includes('runtime')), false);
+  assert.throws(() => monitoringAssets({ enabled: true, environments: ['evil'] }));
+});
 
 test('monitoring uses pinned bounded private services without host or database privileges', () => {
-  const stack = monitoringStack(input);
+  const stack = monitoringStack(monitorInput);
   assert.deepEqual(Object.keys(stack.services).sort(), ['alertmanager', 'grafana', 'prometheus', 'receiver']);
   for (const service of Object.values(stack.services)) {
     assert.equal(service.ports, undefined);
@@ -26,6 +45,16 @@ test('monitoring uses pinned bounded private services without host or database p
   assert.equal(stack.services.grafana.environment.GF_USERS_ALLOW_SIGN_UP, 'false');
   assert.equal(stack.services.grafana.environment.GF_SECURITY_COOKIE_SECURE, 'true');
   assert.equal(stack.services.grafana.environment.GF_SERVER_ROOT_URL, monitorOrigin);
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_ENABLED, 'true');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_HEADER_NAME, 'X-Bairui-Monitor-User');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_HEADER_PROPERTY, 'username');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_AUTO_SIGN_UP, 'true');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN, 'false');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_HEADERS, 'Role:X-Bairui-Monitor-Role');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_SYNC_TTL, '0');
+  assert.equal(stack.services.grafana.environment.GF_USERS_AUTO_ASSIGN_ORG_ROLE, 'Viewer');
+  assert.equal(stack.services.grafana.environment.GF_SECURITY_ALLOW_EMBEDDING, 'true');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_WHITELIST, '10.0.3.9');
   assert.ok(stack.services.grafana.environment.GF_SECURITY_ADMIN_PASSWORD__FILE);
   assert.equal(stack.services.grafana.environment.GF_ANALYTICS_REPORTING_ENABLED, 'false');
   assert.equal(stack.services.grafana.environment.GF_PLUGINS_PREINSTALL_DISABLED, 'true');
@@ -65,6 +94,7 @@ test('existing preprod opt-in joins monitoring with metrics secret without expan
   const stack = stackConfig({ ...input, monitoring: { enabled: true } });
   assert.equal(stack.services.api.environment.BAIRUI_METRICS_ENABLED, '1');
   assert.equal(stack.services.api.environment.BAIRUI_METRICS_PORT, '9464');
+  assert.equal(stack.services.api.environment.BAIRUI_PROMETHEUS_URL, 'http://bairui-monitor_prometheus:9090');
   assert.equal(stack.services.api.environment.BAIRUI_TRUSTED_PROXIES, '10.0.1.3/32');
   assert.ok(stack.services.api.networks.includes('monitor'));
   assert.equal(stack.networks.monitor.external.name, monitorNames.network);
@@ -78,7 +108,17 @@ test('Caddy isolates Grafana and does not expose any metrics or collection endpo
   assert.ok(!original.includes(':9443'));
   const enabled = gatewayConfig({ monitoring: { enabled: true } });
   assert.ok(enabled.includes('https://localhost:9443'));
-  assert.ok(enabled.includes('bairui-monitor_grafana:3000'));
+  assert.ok(enabled.includes('name tasks.' + monitorNames.grafana));
+  assert.ok(enabled.includes('port 3000'));
+  assert.ok(!enabled.includes('reverse_proxy ' + monitorNames.grafana + ':3000'));
+  assert.ok(enabled.includes('forward_auth'));
+  assert.ok(enabled.includes('/api/admin/monitoring/access'));
+  assert.ok(enabled.includes('request_header -X-Bairui-Monitor-Role'));
+  assert.ok(enabled.includes('copy_headers X-Bairui-Monitor-User X-Bairui-Monitor-Role'));
+  assert.ok(enabled.includes('@emergencyPublic path /public/*'));
+  assert.ok(enabled.includes('header_up -Cookie'));
+  assert.ok(enabled.includes('header_down -Set-Cookie'));
+  assert.ok(enabled.includes('frame-ancestors https://localhost:8443'));
   assert.ok(enabled.includes('handle @private {\n    respond 404\n  }'));
   assert.ok(enabled.indexOf('handle @private') < enabled.indexOf('handle @api'), 'deny_route_precedes_spa_fallback');
   assert.ok(!enabled.includes('reverse_proxy bairui-monitor_prometheus'));
@@ -87,7 +127,8 @@ test('Caddy isolates Grafana and does not expose any metrics or collection endpo
 });
 
 test('monitoring config identifiers cannot inject compose or Docker targets', () => {
-  for (const field of ['installation', 'nodeId', 'revision']) assert.throws(() => monitoringStack({ ...input, [field]: 'bad\nvalue' }));
+  for (const field of ['installation', 'nodeId', 'revision']) assert.throws(() => monitoringStack({ ...monitorInput, [field]: 'bad\nvalue' }));
+  for (const gatewayIp of ['999.999.999.999', '127.0.0.1', '10.0.0.1/24', 'gateway']) assert.throws(() => monitoringStack({ ...monitorInput, monitoring: { enabled: true, gatewayIp } }));
 });
 
 test('acceptance report marks success only after footprint collection and resets on failure', async () => {

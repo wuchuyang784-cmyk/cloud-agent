@@ -5,6 +5,7 @@ import { Registry, Counter, Histogram, Gauge, collectDefaultMetrics } from 'prom
 import { createReadiness } from '../service-lifecycle.mjs';
 import { methodLabel, routeLabel, statusLabel } from './labels.mjs';
 import { safeLog } from './safe-log.mjs';
+import { createHostSampler } from './host-metrics.mjs';
 
 const digest = token => createHash('sha256').update(token).digest();
 
@@ -25,7 +26,7 @@ export function metricsConfiguration(env) {
   const token = text.replace(/\r?\n$/, '');
   if (!/^[A-Za-z0-9._~+/-]{32,256}={0,2}$/.test(token) || token.length > 256
     || new Set(token).size < 8 || /^(.{1,16})\1+$/.test(token)) throw new Error('metrics_token_invalid');
-  return { enabled: true, port, tokenHash: digest(token) };
+  return { enabled: true, port, tokenHash: digest(token), hostMetrics: env.BAIRUI_HOST_METRICS_ENABLED === '1' };
 }
 
 function authorized(request, tokenHash) {
@@ -55,6 +56,15 @@ export function createTelemetry(config, store, { readinessTimeoutMs = 250 } = {}
   const registry = new Registry();
   collectDefaultMetrics({ register: registry });
   const registers = [registry];
+  if (config.hostMetrics) {
+    const host = createHostSampler();
+    new Gauge({ name: 'bairui_host_cpu_usage_ratio', help: 'Measured host CPU busy fraction since the preceding scrape.', registers,
+      collect() { this.set(host.cpu()); } });
+    new Gauge({ name: 'bairui_host_memory_used_bytes', help: 'Actual OS host used memory, not container memory.', registers,
+      collect() { this.set(host.memory().used); } });
+    new Gauge({ name: 'bairui_host_memory_total_bytes', help: 'Actual OS host total memory, not container capacity.', registers,
+      collect() { this.set(host.memory().total); } });
+  }
   const labelNames = ['method', 'route', 'status'];
   const requests = new Counter({ name: 'bairui_http_requests_total', help: 'Completed API requests, including client aborts (499).', labelNames, registers });
   const duration = new Histogram({ name: 'bairui_http_request_duration_seconds', help: 'API request duration in seconds.', labelNames,

@@ -60,7 +60,7 @@ Set-Location E:\cloud-agent
 npm run dev
 ```
 
-打开启动脚本打印的客户端地址，默认 `http://127.0.0.1:5173/`；使用自己的邮箱账号登录，进入“开发与部署 → 可观测”。原来没有 Agent 的账号显示“暂无 Agent 记录”是正常情况，不应为展示监控而重新开放平台模式的 Agent 创建与执行。
+打开启动脚本打印的客户端地址，默认 `http://localhost:5173/`；使用自己的邮箱账号登录，进入“开发与部署 → 可观测”。原来没有 Agent 的账号显示“暂无 Agent 记录”是正常情况，不应为展示监控而重新开放平台模式的 Agent 创建与执行。
 
 本次浏览器验收使用一次性 PostgreSQL、真实 Better Auth 和合成历史记录，不连接 `bairui`，不读取业务 `.env`，不重启现有开发服务或常驻预发。截图在 `output/playwright/client-monitoring/`。这些测试账号不是你的真实管理员。
 

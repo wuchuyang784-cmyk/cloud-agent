@@ -42,3 +42,23 @@ test('expired sessions notify the console and logout failures remain failures', 
   t.mock.method(globalThis, 'fetch', async path => path.endsWith('/config') ? Response.json({ provider: 'better-auth' }) : Response.json({}, { status: 503 }));
   await assert.rejects(api.logoutAccount(), error => error.status === 503);
 });
+
+test('governance feedback refreshes identity; cancelled identity requests cannot expire a new session', async t => {
+  const events = [];
+  globalThis.window = { dispatchEvent(event) { events.push(event.type); } };
+  t.after(() => { delete globalThis.window; });
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ error: { code: 'account_suspended' } }, { status: 403 }));
+  await assert.rejects(api.createResource({ kind: 'skill', name: 'blocked' }), error => error.code === 'account_suspended' && error.message.includes('暂停'));
+  assert.deepEqual(events, ['bairui:account-refresh']);
+  let finish;
+  t.mock.method(globalThis, 'fetch', (_path, init) => {
+    assert.equal(init.cache, 'no-store');
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const controller = new AbortController();
+  const pending = api.fetchCurrentUser(controller.signal);
+  controller.abort();
+  finish(Response.json({ error: { code: 'unauthenticated' } }, { status: 401 }));
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.deepEqual(events, ['bairui:account-refresh']);
+});

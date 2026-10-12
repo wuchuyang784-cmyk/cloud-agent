@@ -21,6 +21,111 @@
 
 ## 项目定位
 
+### F1：固定源码 pi Runtime（2026-10-11，独立验收通过，未部署）
+
+- 本批位于 `apps/platform-api/src/runtime/pi/production/`，独立固定配置/HMAC 请求、单任务有界 NDJSON、持久会话与任务 UUID 占位；旧 pi adapter/wrapper 保留，仅供 legacy 回归。不改 API/dev 启动链、E2 probe、平台能力开关或既有部署。
+- `upstreams/pi` 固定 `c1d4c801114545f47c440921d8b3e04aeb1e565d` / 0.85.1，拒绝源目录和 gitlink/锁文件漂移。模型目录 JSON 从同版本 pi-ai 发布 tarball 单独固定 SHA-512 提取（无 JS），保留上游目录校验与源码编译；记录数据发布提交区别，不将其冒充主源码内容。
+- 独立命令 `npm run pi:source:check`、`pi:build`、`test:pi`、`test:pi:live`；产物在忽略的 `output/pi-runtime/`。真实 pi + HTTPS/SSE fixture 验收不使用用户 Key/付费模型，按归属清理临时容器/卷/网络，不操作 Linux 服务器、业务库或常驻预发。
+- F1 专项 48 通过；后端全量 326 通过/9 数据库专项跳过/0 失败；独立规格与质量审查完成。实际 amd64 镜像版本 `a9fbc2fa0e66252fcb35`，真实容器报告 `output/pi-runtime/acceptance/2026-10-11T15-01-34-473Z.json` 的 16 项检查均通过，含会话恢复、真实工具、超时/取消、输出超限、临时资源清理与原容器保留。未验收 arm64 或真实付费 Provider。
+- F1 不是用户 Agent 已上线或多租户沙箱完成：工具与 wrapper/state 同 UID，F2 凭据保险库/模型网关与 F3 控制 Secret、网络、存储、进程树隔离必须后续交付；不允许据此开放真实用户创建/执行。服务器规格主要影响 F3/F4/F7，非本批前置条件。运行契约与验证记录见 `docs/50-f1-pi-runtime.md`。
+
+### 业务管理端 Grafana（2026-10-11，本机已部署）
+
+- 当前 `http://localhost:5173/admin/` 使用业务 Better Auth 会话与平台角色访问同源 Grafana Viewer，不再要求业务账号登录独立预发。五项导航保留；客户端不增加平台监控入口。
+- 独立业务 Prometheus/Grafana/Caddy，入口 `npm run monitor:business:up/status/stop`（分别执行对应 script）；只有机器 Bearer 桥接绑定回环 9493。私有 connector 在已忽略 `output/business-monitoring/`，dev 显式加载，不修改业务 `.env`，不在生产启用该本机连接配置。
+- 17 个固定面板采集当前业务 API（预期 1 副本）、业务 PostgreSQL、Windows 实测 CPU/内存及两环境 Controller；每次浏览器请求重验会话、active 账号和平台监控权限。只开放固定只读接口及固定 PromQL；不放开任意数据源代理、配置写入或 Docker 权限。
+- 十二条业务规则的固定来源标签防止与共享 Alertmanager 的预发告警 fingerprint 混淆；旧接收器保留 `instance=127.0.0.1:9465` 作为业务采集来源，不代表故障 Controller 地址。原预发服务、卷、Secret、CA 与认证配置保留。
+- 更新先暂存并完成官方 promtool/Caddy 校验，再短暂停止仅本安装三个监控容器，原子发布/重挂载；保留 token、数据卷及历史。Controller 当前启动网络错误已恢复；恢复必须匹配本次 Docker 启动错误分类，旧 State.Error 不授权删除。
+- 真实 Better Auth/受限 PostgreSQL 浏览器验收通过：17 面板查询、即时数字不重复、Viewer、刷新/独立打开、390/320px、暂停/恢复/退出及普通账号拒绝。真实业务 Grafana firing/resolved 和完整 stop/up 保留验收通过；原业务 6 用户、6 Agent、4 资源、0 run 未改变。
+- 后端 284 通过/9 数据库容器专项跳过/0 失败，管理端 18、业务监控/原监控/Runtime 配置合计 97 项、预发配置 63 项通过，管理端构建通过。报告与边界见 `docs/49-business-admin-grafana.md`。本机长驻开发进程不等于 Windows 开机服务；未开放真实 Agent 或客户端部署/运维/审批功能。
+
+### E3：业务库与常驻预发接入（2026-10-10，已部署并完成常驻验收）
+
+- 用户明确授权后，分别备份并追加业务 `bairui` 和预发 `bairui_preprod` 的 039/040；不重跑既有治理迁移，不给应用或 Controller 用户启停权限。业务默认表授权已针对 Runtime control 表撤销；原 6 用户、6 Agent、4 资源与历史路由保留，不插入业务演示 Agent。
+- 两个环境各自拥有受限 Controller 登录、独立 ledger 数据库/角色、安装身份、HMAC、TLS、指标 Secret 和 internal 网络。独立常驻容器 `unless-stopped` + `--init`，没有宿主端口；Controller 非 root、无 Docker socket，只有编排器持有 Docker 权限，平台 API 不增权。
+- managed 入口 `npm run runtime:deploy -- up/status/stop business` 或 `preprod`；只读私有 JSON，不读业务 `.env`。isolation 原限制保留。普通预发 stop/up 联动预发 Runtime，不停止或升级业务 Runtime；共享监控停机期间业务 Controller 运行但不采集。
+- 预发 API/网关镜像版本 `984167c866f5c602`，编排器 `af542fe7243cff14`；原卷、平台 Secret 和 Caddy CA 保留。监控显式采集两个 Controller，原七条平台规则加五条 Runtime 规则；真实 firing/resolved 已验证。
+- 常驻端到端报告 `output/runtime/acceptance-2026-10-10T05-28-12-590Z.json` 全通过，包含真实内核限制、Controller 自动重启保留原 run、真实 TTL 回收与审计、治理停止/解除不重启，以及告警闭环。仅预发新建无凭据验收身份，测试管理员已撤权，探针已回收，历史保留；业务没有活跃 Runtime run。
+- 完整 `test:preprod` 与最终 `test:monitoring` 均通过，报告 `acceptance-2026-10-10T05-29-31-790Z-ed9899.json`、`monitoring-acceptance-2026-10-10T09-08-39-985Z-e47976.json`；真实数据库故障、双 API 滚动、完整 stop/up、Grafana Viewer 与监控四组件重建均验收。停启前后核对 Runtime 身份、网络、Secret、私有配置、ledger OID/历史与 CA 不变，业务两个进程未重启；记录在 `output/runtime/stop-up-preservation-2026-10-10.json`。
+- 真实 pi/dsh/Provider、用户 Agent 创建/执行、旧 Worker/Runtime/Boundary 仍关闭；固定无模型 probe 不等于真实 Agent 上线。不代表编排器崩溃恢复、整机重启、跨节点 HA 或公网生产验收。部署与备份说明见 `docs/48-e3-managed-runtime-rollout.md`；下方 E3/E2/E1 为历史隔离阶段记录。
+
+### E3：常驻 Controller、状态回流及告警（2026-10-10，本机隔离验收，未部署）
+
+- 独立入口 `npm run controller:isolation`，实现位于 `apps/platform-api/src/runtime/supervision/`；显式 isolation、回环专用受限 PostgreSQL、HTTPS 编排器、精确 Runtime 白名单和独立指标 token，不读业务 `.env`，不加入 dev/app，不持有 Docker 权限或安装后台系统服务。
+- 新迁移 `040_runtime_supervision.sql` 在既有 control 表增加观察租约及最近状态；Memory/PG 双实现，worker/token/run/control generation 围栏，治理共享锁和 Agent→control→run 锁序。仅匹配 signed stopped/absent 才撤路由、停止 run/control/Agent 并记录随机系统 recovery_stop 审计；错误不释放，不自动重启，running 不发布缺失路由。
+- 串行有界周期、失败后继续、退出等待在途；固定聚合指标不含身份/URL/SQL。周期失败保留上次快照，停止超过 60 秒、观察超过 60 秒不成功及仍占用 active run 的 dead 命令产生告警；真实停止后解除，历史审计保留。
+- 五类固定 Runtime 告警复用 Prometheus→Alertmanager→现有本地接收器。规则为独立 opt-in 资产，没有自动修改预发。Controller 指标固定回环监听；隔离告警测试临时使用自有 bridge 和鉴权宿主端点，后续部署需明确采集路径。
+- `test:runtime-supervision` 覆盖两池租约/迟到回执、双方向治理锁、写入失败回滚、最小权限、迁移重跑及真实受限 Controller 进程→TLS E2→Docker TTL/异常退出/治理停止→平台/指标。`test:runtime-alerts` 覆盖官方规则与真实 firing/resolved；告警故障快照为测试注入，两段分别验收，不宣称已经端到端部署。
+- E3 专项 23、E1 62、E2 34、平台模式 25、监控配置 23 项通过；后端全量 266 通过/9 数据库容器专项跳过/0 失败。官方规则 18 场景/90 断言、实链路 14 条告警/解除持久记录；真实 Controller 数据库登录断连后保留快照并恢复。Docker 专项串行执行，避免高负荷造成有界 CLI 超时与后续连带断言失败。
+- 本批仍使用固定无模型 probe，真实 pi/dsh/Provider、全局容量准入和用户执行入口保持后续独立准入；业务 bairui、bairui-postgres 和常驻预发未操作，临时资源按随机归属精确清理。说明见 `docs/47-e3-controller-supervision.md`。
+
+### E2：实际编排器与资源回收（2026-10-09，本机隔离验收，未部署）
+
+- 独立入口 `npm run orchestrator:isolation`，实现位于 `apps/platform-api/src/runtime/orchestrator/`；仅显式 isolation + 专用 ledger PostgreSQL + TLS 回环监听，不读取业务 `.env`，不进入 dev/app 启动链，不给平台 API Docker 权限。
+- 使用真实 Docker 容器内的固定 `isolation-probe-v1` 无模型进程；pi 仅为 E1 协议槽位，未接真实 pi/dsh/Provider。用户侧 Agent 写入/执行及旧 Worker/Runtime/Boundary 仍关闭，没有部署业务或预发。
+- 独立机器 ledger 持久 run 状态、创建/启动尝试、完整容器 ID、永久停止标记和原子 nonce；不新增业务迁移。creating 且容器暂缺为不确定，禁止重复创建或假确认 absent；旧 run 不重启，改名后仍按完整 ID 回收，删除未确认保持 stopping。
+- 固定本机 sha256 镜像与同安装 internal 网络，CPU/内存/PID、非 root、只读根、cap-drop/no-new-privileges，无任意 env/命令/卷/端口；启动参数不是对 Docker 管理员的沙箱。没有全局容量准入或真实工作负载挂载。
+- 独立 reaper 回收到期、异常退出和待停止容器，失败轮转不饿死后续记录；本阶段无业务活动，TTL 从首次意图起计，GET/健康检查/重试不续期。不承诺故障下释放时限，也未接平台路由/TTL 状态主动回流或生产告警。
+- `npm run test:orchestrator` 34 项全通过，含真实 cgroup/只读限制、精确删除、受限 PG、两池锁与 nonce、连接终止恢复、结果丢失、独立 HTTPS 进程强杀重启；TTL 用注入时钟后实际删除容器。E1 62、平台 25 全通过，后端 251 通过/8 数据库专项跳过/0 失败。
+- 专项仅使用一次性容器、临时库/网络/证书并按归属清理，业务 bairui 和常驻预发未操作；说明见 `docs/46-e2-isolated-orchestrator.md`。后续 Controller 常驻协调/告警及治理停止闭环见上方 E3，再分阶段接真实 Agent。
+
+### E1：真实 Runtime 控制安全底座（2026-10-09，本机隔离验收，未部署）
+
+- 新增迁移 `039_runtime_control_fencing.sql`、Memory/PostgreSQL 双 Store、单 tick Controller 和签名远端控制协议；没有公开启停接口、常驻 Controller 或真实 Orchestrator，平台 Agent 写入/执行与旧 Worker/Runtime/Boundary 入口仍关闭。
+- control generation、run generation 与路由版本共同围栏；停止先撤路由，只有匹配 stopped/absent 确认才清空 active run。旧 run 未确认停止时禁止新启动；启动重试耗尽原子生成补偿 stop，停止耗尽保留 stopping/dead，不宣称资源释放。
+- 回执须匹配 worker、request UUID、attempt 和未到期租约；启动记录治理版本，暂停后立即解除也不能复活旧 run。事务显式 READ COMMITTED，与 D1 同键治理锁协调；旧 Worker 仅领取 agent.provision，不允许与旧无代次控制副本混跑。
+- 请求/响应双向 HMAC，响应绑定本次 nonce；固定资源 DTO、不传 env/Provider Key，远端 URL allowlist，总超时覆盖正文。编排器必须持久化 stop 终止标记，absent 也须阻止迟到 PUT；当前仅 fake 合约验收，尚未证明真实容器回收。
+- `npm run test:runtime-control` 62 项通过，含真实 HTTP fake、受限 PostgreSQL、双向治理锁等待、审计外键锁序、系统请求 UUID 占位冲突、迟到回执、故障回滚及最小权限；后端全量 228 通过/7 个数据库专项跳过/0 失败，平台 25、治理 15、调度 26 项全通过。专项只用一次性数据库，业务 bairui 和常驻预发未操作。
+- 039 不依赖模拟调度 033/038；目标环境仍须备份、核对前置迁移和最小函数授权。E1 运行边界与测试记录见 `docs/45-e1-runtime-control-safety.md`。真实编排器、常驻协调/告警、配额与 TTL 执行、Provider 和用户入口留待后续，不写作真实 Agent 已上线。
+
+### 统一管理与监控控制台（2026-10-08，常驻预发已更新）
+
+- 管理端采用五项导航：平台概览、用户账号、Agent 服务、运行监控、告警；客户端不增加跨用户管理或 Grafana入口。
+- 平台 API 只允许固定 PromQL 查询，浏览器不能传入查询表达式或上游地址；监控 503 与用户/Agent 管理状态隔离。
+- 9443 Caddy 对日常 Grafana 请求逐次复核 Better Auth、active 账号和平台角色，再注入 Viewer 技术身份；Grafana Auth Proxy 只信任网关监控网络精确 IP。
+- Grafana 独立管理员登录保留为应急通道，不在 UI 暴露密码。隔离 Docker 兼容性测试验证 Viewer、伪造头/会话拒绝与平台鉴权不可用时应急登录仍可达。
+- 2026-10-08 已提交并推送，常驻预发更新为镜像版本 `0af022020540c78c`（源码提交 `26e0717`）。更新前备份位于已忽略的 `output/preprod/backups/unified-console-2026-10-07T16-08-58-814Z/`；数据库 dump 已校验可列出，原数据库卷、证书卷和 Secret 身份保持不变。
+- 最新 `test:preprod` 与 `test:monitoring` 完整通过，报告分别为 `acceptance-2026-10-08T04-53-01-494Z-c65638.json` 和 `monitoring-acceptance-2026-10-08T11-04-11-960Z-86a257.json`。浏览器验证覆盖管理员/观察员、五项导航、Grafana Viewer、暂停拒绝、解除恢复、封禁撤销旧会话，以及 1440/390/320px 布局；测试会话已退出，临时凭据已删除。
+- 部署期间修复了预发输入清单、监控滚动收敛等待、psql stdin、Grafana Auth Proxy 源 IP、Grafana 验收登录方式和 320px 指标卡片溢出。业务库 `bairui` 与容器 `bairui-postgres` 未操作；真实 Agent、模拟 Worker 和用户侧执行仍关闭。详细记录见 `docs/44-unified-admin-monitoring-rollout.md`。
+
+### 双端平台 D2：模拟调度治理闭环（2026-10-06 并发补强；2026-10-07 常驻预发已更新）
+
+- 已有迁移 038 与 TaskStore 治理围栏现已补齐本机 PostgreSQL 验收：暂停/封禁取消排队和运行模拟任务，清空租约并拒绝旧 Worker 回执；解除不重试旧任务，新任务使用新治理版本。
+- 两种 Store 统一先协调治理，再恢复过期租约，最后一次租约到期也不能跳过治理。状态不可用时整笔事务回滚。
+- PostgreSQL 调度先取既有决策锁，再取与 036/037 治理函数同键的共享事务锁，持有到提交；治理函数使用独占锁。调度事务显式使用 `READ COMMITTED`，所有调度副本必须同版升级，不混跑旧 Worker。
+- 取消在下一次成功提交的调度变更事务落库，不是管理操作同步强停；只读查询和被拒绝的提交不触发持久化取消。
+- `npm run test:scheduler` 使用一次性数据库，新专项含两个受限连接池、真实治理函数和双方向数据库锁等待。测试文件串行避免跨 schema 决策锁竞争，文件内仍验证并发。
+- 2026-10-07 已备份并更新独立常驻预发，镜像版本 `13b3fb4e7579ed38`；038 及最小授权原已存在，本轮未执行数据库迁移。两份 API 内的调度源码哈希与本机一致，完整预发验收通过，含滚动重建、数据库断连恢复和完整 stop/up；监控四服务健康、两份 API 指标采集正常。
+- 部署修复了预发/监控 CLI 循环导入等待和停止网关的 overlay 恢复问题；重建网关保留原证书卷，先停止 API，再按新网关 IP 更新精确信任。配置回归 59 项、监控配置回归 22 项通过。
+- 业务库 `bairui` 未操作，原数据卷、证书和 Secret 保留。不启用模拟 Worker 或真实 Agent，模拟 HTTP 入口仍关闭；本轮不是 Swarm 多进程 D2 治理、真实 Runtime 强停、资源回收或生产容量验收。说明和验收记录见 `docs/43-phase3-governance-d2.md`。
+
+### 双端平台 D1：账号治理（2026-09-20，独立验收，业务库未启用）
+
+- 管理端用户列表可查看账号状态和治理审计；只有 active 的 `platform_admin` 可暂停、封禁、解除。viewer/operator 只读，不能操作自己或限制最后一个有效管理员。
+- suspended 允许登录和本人业务查询，拒绝业务写入及管理端访问；banned 禁止登录并撤销全部 Better Auth 会话；解除不恢复旧会话、不启动 Agent、不改变平台能力开关。客户端导航和资源库保留。
+- 新迁移 `036_account_governance.sql` 依赖基础表、032、034，不依赖模拟调度 033。治理状态和审计表 FORCE RLS，应用账号只获五个受限函数的 EXECUTE，不直读写治理表或使用审计序列。
+- 后续迁移 `037_governance_reason_length.sql` 将治理原因改为必填、允许单字符、最多 500 字符；前后端仍拒绝纯空白和控制字符。已有 036 环境先备份再追加 037，不要倒序重跑 036；保留原状态、审计及函数授权，不自动迁移业务库。
+- 状态、会话删除和审计在同一事务提交；版本校验、请求 UUID 幂等和短事务锁保护并发治理。会话创建触发器与治理共享身份锁，防止并发登录留下有效会话。缺表、缺权限或状态不确定时拒绝访问，不回退放行。
+- 客户端每 30 秒、焦点/可见性变化或暂停拒绝时刷新身份；这不是实时推送。后端每次按账号状态准入，不依赖界面刷新，也不承诺撤销已准入的在途操作。
+- `npm run test:governance` 和 `test:governance:web` 使用一次性测试库与测试身份，不读取业务 `.env`；后者需本机已安装的 Playwright/Chromium。不得关闭认证限流以使验收通过。
+- 中文技术路径和启用步骤见 `docs/42-dual-console-phase-d1.md`。本批没有迁移业务 `bairui`、修改真实账号或常驻预发。启用前备份、执行 036、最小授权，所有 API 同版升级；不要让忽略治理的旧副本继续接流量。
+- D1 仅完成账号准入治理；模拟调度取消见上方 D2，真实 Agent 强停、资源回收和 Runtime 仍属后续 E。不能把 D1/D2 写成真实 Agent 治理或生产高并发已验收。
+
+### 双端平台 C 批：管理端服务器资源（2026-09-20，业务库已接入）
+
+- 管理端“服务器资源”页面已于 2026-09-30 移除：删除 `InfrastructureView.tsx`、类型定义、导航入口和样式，后端 `GET /api/admin/infrastructure`、`infrastructure:read` 权限与 `projectInfrastructure` 一并删除。资源展示后续由 Grafana 面板承接；采集链路（035 迁移、采集器、数据库快照与读取函数）保留作为数据来源。客户端仍不增加跨用户或服务器管理入口。
+- 继续不接模型、模型 API 或真实 Agent；平台模式的 Agent 写入和执行保持关闭。复用 Better Auth、显式平台角色和现有管理端，不增加另一套账号系统。
+- 新迁移 `035_platform_infrastructure.sql` 依赖基础表和 034、不依赖 033。两张资源表强制 RLS；应用账号只获读取函数 EXECUTE，独立采集登录账号只获上报函数 EXECUTE，由 DBA 绑定 `session_user` 与采集源。
+- 独立采集进程使用操作系统指标和固定只读 Docker CLI，API 不挂载 docker.sock。入口为 `npm run infra:check`、`npm run infra:once`、`npm run infra:collect`；配置独立保存在已忽略的 `.env.infrastructure`，不复用业务 `.env` 或应用账号。
+- Windows 主机实测值和 Docker Desktop Linux VM 容量分开；预留/限制不是实际用量。节点实测 CPU/内存仍为 null；每源仅保存最新快照，超过 90 秒标为过期，无数据不补零。
+- 采集边界为本机 Docker context、最多 32 节点/128 服务/2048 条任务记录，单轮 Docker 查询最多 20 秒。Docker 只读是本批代码的操作范围，不是对持有 Docker 权限账号的沙箱。
+- `npm run test:infrastructure` 9 项通过（含新增 Linux 服务模板静态检查），桌面/390px/320px 浏览器验收通过，包含真实只读采样、过期、不可用、空状态、撤权和普通用户拒绝；管理端、客户端及平台模式回归通过。中文说明见 `docs/41-dual-console-phase-c.md`。
+- 用户确认后已备份业务库 `bairui` 并执行 035，配置应用最小读取授权、独立受限采集账号及 `development-host` 源；真实快照入库且经应用投影为 fresh。原管理员授权读取和 4 个普通用户拒绝已验证，不改账号密码或伪造登录会话。
+- 本地开发服务已重启，独立采集进程在 `cloud` 环境启动；凭据仅保留于受限本地配置，不进入 Git。未安装 Windows 开机服务，未修改常驻预发。操作记录和备份在已忽略的 `output/infrastructure-provisioning/20260920/`，不要按历史 PID 盲目停止进程。
+- Linux 原生采集部署说明及 systemd 模板见 docs/41 第 8 节与 `infra/systemd/bairui-infrastructure.service`。服务器需单独迁移授权、每主机独立源和凭据；manager 采集集群，worker 只采主机。模板未在 Linux 实机部署，Docker 权限仍需明确评审。
+- 快照归一化 `normalizeSnapshot` 已从 `apps/platform-api/src/admin/infrastructure.mjs` 迁到 `scripts/infrastructure-snapshot.mjs`，采集器改引用新模块；`npm run test:infrastructure` 只跑采集器测试，`test:infrastructure:web` 浏览器验收脚本已删除。
+- 既有 Prometheus/Grafana 部署、治理封禁、自动扩缩容和真实 Runtime 不属于本批完成范围。
+
 ### 双端平台 B 批：客户端本人 Agent 监控（2026-09-19）
 
 - 客户端“开发与部署 / 可观测”已接入本人 Agent 只读列表、搜索、分页和今日/近 7 天/近 30 天的历史用量；不改变原导航、资源库和平台能力开关。
@@ -41,14 +146,14 @@
 - 独立验证入口 `npm run test:admin`、`npm run test:admin:web`、`npm run build:admin`。业务库已用真实受限应用连接验证管理员读取、其他 4 个账号拒绝、管理表直读拒绝；真实账号浏览器验收仍需用户重启开发服务后使用原密码完成。常驻预发未修改，不代表监控部署、真实 Agent 或平台治理已完成。
 - 后续顺序：B 本人 Agent 监控，C 管理端基础设施观测，D 治理执行闭环，E 真实 Runtime。D 批规则：暂停账号服务允许只读登录；封禁账号禁止登录并撤销会话、阻止 Agent 服务；解除不自动启动 Agent。
 
-### 第三阶段 3.2 监控与本地告警（2026-09-19，代码已验证，未部署验收）
+### 第三阶段 3.2 监控与本地告警（2026-10-08，常驻预发已验收）
 
 - 入口为 `npm run monitor:up/status/stop/alerts/password`，说明见 `docs/38-phase3-monitoring.md`。源码命令使用各自独立 npm script，不把冒号后的斜线组合当作命令执行。
 - 使用 Prometheus、Grafana、Alertmanager 和白名单告警接收器；监控网络独立且内部隔离，Grafana 只经 Caddy 的回环 `9443` 访问，不塞入客户端 UI。
 - API 指标默认为关闭；预发启用后使用专用端口和独立 Secret，按 tasks DNS 分别采集两份 API。指标和错误日志不得记录身份、正文、Cookie、原始 URL/SQL。
 - 新监控资源归属、卷、Secret 和开关记入现有预发状态。禁止缺失后自动生成替代数据；普通预发启停保留并恢复已接入监控，停止不删卷。
-- 本机组合测试 79 项通过，后端与前端回归、独立 PostgreSQL 平台/调度专项通过；Caddy 实际配置解析通过。初始化中断可重试已确认归属的卷根目录权限，不替换 Secret，不修改已完成安装的卷权限。
-- Docker Hub 拉取先前返回 EOF，最近重试为官方 registry 连接超时。官方 promtool/amtool、实际部署、故障告警和浏览器验收尚未完成；需用户确认可用代理或批准镜像来源。不得把代码或单元测试通过写成平台运维已验收。
+- 固定 Prometheus/Grafana/Alertmanager 镜像已部署；官方 promtool/amtool、真实 API `2 -> 1 -> 2` 告警与恢复、本地接收器持久化、四组件重建、指标历史和 Secret 保留均已验收。
+- 统一管理端中的固定 PromQL 概览、当前告警和 Grafana Viewer 已完成真实浏览器验证。Grafana Prometheus 插件缺少 `zh-Hans` 资源时会在控制台产生 404 并回退，不影响看板加载；不要把该非阻塞上游本地化回退误判为平台鉴权失败。
 - `test:monitoring` 会暂降仅预发 API 副本并重建监控服务，不对正在使用的预发执行。通知只在本机，不能覆盖整机停机或替代外部告警。
 
 ### 第三阶段 3.1 常驻预发（2026-09-18）

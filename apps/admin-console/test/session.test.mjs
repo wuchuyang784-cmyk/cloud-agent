@@ -6,6 +6,91 @@ const me = { role: 'platform_viewer', permissions: ['users:read', 'agents:read']
 const response = (data, status = 200) => new Response(JSON.stringify(data), { status });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
+test('governance denial invalidates a concurrent background refresh, including transports ignoring abort', async () => {
+  for (const [status, phase] of [[401, 'login'], [403, 'denied']]) {
+    const pending = deferred(); let refreshing = false; let refreshSignal;
+    const model = new AdminSession(async (path, options) => {
+      if (path.includes('/governance')) return response({}, status);
+      if (path === '/api/admin/me') return response(me);
+      if (refreshing) { refreshSignal = options.signal; return pending.promise; }
+      return response({ items: [{ id: 'target' }], nextCursor: null });
+    });
+    await model.load({ view: 'users' }); refreshing = true;
+    const refresh = model.refresh({ view: 'users' });
+    await new Promise(resolve => setImmediate(resolve));
+    await model.openGovernance({ id: 'target' });
+    assert.equal(model.getSnapshot().phase, phase);
+    pending.resolve(response({ items: [{ id: 'stale-secret' }], nextCursor: null })); await refresh;
+    assert.equal(model.getSnapshot().phase, phase);
+    assert.equal(model.getSnapshot().me, null);
+    assert.deepEqual(model.getSnapshot().items, []);
+    assert.ok(refreshSignal.aborted);
+  }
+});
+
+test('background monitoring refresh keeps its verified iframe mounted but access revocation clears it', async () => {
+  let pending = null;
+  const identity = { ...me, permissions: [...me.permissions, 'monitoring:read'] };
+  const model = new AdminSession(async path => pending ? pending.promise : response(path === '/api/admin/me' ? identity
+    : { metrics: {}, dashboardUrl: '/api/admin/grafana/d/bairui-platform/bairui-platform?kiosk', scope: 'business' }));
+  await model.load({ view: 'monitoring' });
+  pending = deferred();
+  const refresh = model.refresh({ view: 'monitoring' });
+  assert.equal(model.getSnapshot().phase, 'ready');
+  assert.equal(model.getSnapshot().monitoring.phase, 'ready');
+  pending.resolve(response({}, 403)); await refresh;
+  assert.equal(model.getSnapshot().phase, 'denied');
+  assert.equal(model.getSnapshot().monitoring.data, null);
+});
+
+test('governance UI: timeout retry preserves request identity, confirmed changes refresh status', async () => {
+  const commands = []; let attempts = 0;
+  const model = new AdminSession(async (path, options) => {
+    if (path.endsWith('/governance') && options?.method === 'POST') {
+      commands.push(JSON.parse(options.body));
+      if (++attempts === 1) throw new Error('network_lost');
+      return response({ account: { status: 'suspended', version: 1 } });
+    }
+    return response(path === '/api/admin/me' ? { ...me, role: 'platform_admin', permissions: [...me.permissions, 'users:govern'] }
+      : path.endsWith('/governance') ? { account: { status: attempts > 1 ? 'suspended' : 'active', version: attempts > 1 ? 1 : 0 }, items: [], nextCursor: null }
+      : { items: [{ id: 'target', email: 'target@example.test' }], nextCursor: null });
+  });
+  await model.load({ view: 'users' });
+  await model.openGovernance({ id: 'target' });
+  await model.govern('suspended', 'test reason');
+  assert.ok(model.getSnapshot().governance.retry);
+  assert.equal(model.getSnapshot().governance.success, '');
+  await model.govern('banned', 'changed input must not alter retry');
+  assert.deepEqual(commands[0], commands[1]);
+  assert.equal(model.getSnapshot().governance.account.status, 'suspended');
+  assert.ok(model.getSnapshot().governance.success);
+});
+
+test('governance UI: logout and navigation clear sensitive detail and ignore late mutation responses', async () => {
+  const pending = deferred();
+  const model = new AdminSession(async (path, options) => path.includes('sign-out') ? response({})
+    : path === '/api/admin/me' ? response({ ...me, role: 'platform_admin', permissions: [...me.permissions, 'users:govern'] })
+    : options?.method === 'POST' ? pending.promise
+    : path.endsWith('/governance') ? response({ account: { status: 'active', version: 0 }, items: [], nextCursor: null })
+    : response({ items: [], nextCursor: null }));
+  await model.load({ view: 'users' }); await model.openGovernance({ id: 'target' });
+  const change = model.govern('banned', 'test reason');
+  await model.signOut(); pending.resolve(response({})); await change;
+  assert.equal(model.getSnapshot().phase, 'login');
+  assert.equal(model.getSnapshot().governance, null);
+});
+
+test('admin UI: stalled requests time out and cannot repopulate protected state', async () => {
+  const pending = deferred();
+  const model = new AdminSession(async () => pending.promise, 20);
+  await model.load({ view: 'users' });
+  assert.equal(model.getSnapshot().phase, 'error');
+  assert.equal(model.getSnapshot().me, null);
+  pending.resolve(response(me));
+  await new Promise(r => setImmediate(r));
+  assert.equal(model.getSnapshot().phase, 'error');
+});
+
 test('admin UI: browser fetch is not called with the model as its receiver', async t => {
   t.mock.method(globalThis, 'fetch', async function(path) {
     assert.ok(this === undefined || this === globalThis, 'browser fetch rejects a foreign receiver');
@@ -101,4 +186,31 @@ test('admin UI: sign-in uses existing Better Auth only, no role/header/local cre
   assert.deepEqual(JSON.parse(calls[0].options.body), { email: 'admin@example.test', password: 'test-password' });
   assert.equal(calls[0].options.credentials, 'same-origin');
   assert.equal(calls[0].options.headers['x-platform-role'], undefined);
+});
+
+test('unified console: monitoring failures preserve identity and list navigation remains available', async () => {
+  const identity = { ...me, permissions: [...me.permissions, 'monitoring:read', 'alerts:read'] };
+  const model = new AdminSession(async path => response(path === '/api/admin/me' ? identity
+    : path === '/api/admin/monitoring/overview' ? { error: { code: 'monitoring_unavailable' } }
+    : { items: [{ id: 'user-a' }], nextCursor: null }, path === '/api/admin/monitoring/overview' ? 503 : 200));
+  await model.load({ view: 'overview' });
+  assert.equal(model.getSnapshot().phase, 'ready');
+  assert.equal(model.getSnapshot().me.user.id, 'admin');
+  assert.equal(model.getSnapshot().monitoring.phase, 'error');
+  await model.load({ view: 'users' });
+  assert.equal(model.getSnapshot().items[0].id, 'user-a');
+});
+
+test('unified console: leaving monitoring ignores a late response', async () => {
+  const pending = deferred();
+  const identity = { ...me, permissions: [...me.permissions, 'monitoring:read', 'alerts:read'] };
+  const model = new AdminSession(async path => path === '/api/admin/me' ? response(identity)
+    : path === '/api/admin/monitoring/alerts' ? pending.promise : response({ items: [{ id: 'agent-a' }], nextCursor: null }));
+  const old = model.load({ view: 'alerts' });
+  await new Promise(resolve => setImmediate(resolve));
+  await model.load({ view: 'agents' });
+  pending.resolve(response({ items: [{ name: 'late', severity: 'critical', state: 'firing', activeAt: null, instance: null }] }));
+  await old;
+  assert.equal(model.getSnapshot().items[0].id, 'agent-a');
+  assert.equal(model.getSnapshot().monitoring.phase, 'idle');
 });

@@ -1,11 +1,13 @@
 import { rollbackForRelease } from '../postgres-transaction.mjs';
+import { accountAccess } from './governance.mjs';
 
 const roles = new Set(['platform_viewer', 'platform_operator', 'platform_admin']);
-const permissions = ['users:read', 'agents:read'];
+const permissions = ['users:read', 'agents:read', 'monitoring:read', 'alerts:read'];
 const safeUser = user => ({ id: user.id, email: user.email, displayName: user.displayName ?? null,
   createdAt: user.createdAt ?? null, authLinked: Boolean(user.authSubject?.startsWith('better-auth:')) });
 
 export async function readAdmin(store, actor, resource, query = {}) {
+  if ((await accountAccess(store, actor)).status !== 'active') return null;
   const { q = '', after = '', limit = 25, ownerUserId = '', status = '' } = query;
   if (store.pool) {
     const client = await store.pool.connect();
@@ -15,8 +17,17 @@ export async function readAdmin(store, actor, resource, query = {}) {
       await client.query("SET LOCAL statement_timeout = '3s'");
       const result = await client.query('SELECT platform_admin_read($1,$2,$3,$4,$5,$6,$7) AS result',
         [actor, resource, q, after, limit, ownerUserId, status]);
+      const value = result.rows[0].result;
+      const accounts = resource === 'users' && value
+        ? (await client.query('SELECT platform_governance_accounts($1,$2) AS result', [actor, value.items.map(row => row.id)])).rows[0].result : null;
       await client.query('COMMIT');
-      return result.rows[0].result;
+      if (!value) return null;
+      if (resource === 'me' && roles.has(value.role)) return { ...value, permissions: [...permissions, ...(value.role === 'platform_admin' ? ['users:govern'] : [])] };
+      if (resource === 'users') {
+        if (!accounts) return null;
+        return { ...value, items: value.items.map(row => ({ ...row, account: accounts[row.id] })) };
+      }
+      return value;
     } catch (error) {
       releaseError = await rollbackForRelease(client);
       throw error;
@@ -24,8 +35,8 @@ export async function readAdmin(store, actor, resource, query = {}) {
   }
   const binding = store.platformRoles?.get(actor);
   if (!roles.has(binding?.role) || binding.revokedAt || !store.users.has(actor)) return null;
-  if (resource === 'me') return { role: binding.role, permissions, user: safeUser(store.users.get(actor)) };
-  const rows = resource === 'users' ? [...store.users.values()].map(safeUser) : [...store.agents.values()].map(agent => ({
+  if (resource === 'me') return { role: binding.role, permissions: [...permissions, ...(binding.role === 'platform_admin' ? ['users:govern'] : [])], user: safeUser(store.users.get(actor)) };
+  const rows = resource === 'users' ? [...store.users.values()].map(user => ({ ...safeUser(user), account: store.accountGovernance?.get(user.id) ?? { status: 'active', version: 0, changedAt: null } })) : [...store.agents.values()].map(agent => ({
     id: agent.id, name: agent.name, organizationId: agent.organizationId, ownerUserId: agent.ownerUserId,
     ownerEmail: store.users.get(agent.ownerUserId)?.email ?? null, status: agent.status, engine: agent.engine ?? 'mock',
     createdAt: agent.createdAt ?? null, updatedAt: agent.updatedAt ?? null,

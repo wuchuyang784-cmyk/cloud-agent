@@ -84,6 +84,26 @@ export function App() {
     window.addEventListener('bairui:session-expired', clearUserSession);
     return () => window.removeEventListener('bairui:session-expired', clearUserSession);
   }, [clearUserSession]);
+  useEffect(() => {
+    if (!user?.userId) return;
+    let cancelled = false, pending = false;
+    const controller = new AbortController();
+    const generation = sessionGeneration.current;
+    const check = async () => {
+      if (pending || document.visibilityState !== 'visible') return;
+      pending = true;
+      try {
+        const next = await fetchCurrentUser(AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
+        if (!cancelled && generation === sessionGeneration.current && next?.userId === user.userId) setUser(next);
+      } catch { /* The server continues to enforce access while polling is unavailable. */ }
+      finally { pending = false; }
+    };
+    const timer = window.setInterval(() => void check(), 30000);
+    window.addEventListener('focus', check);
+    window.addEventListener('bairui:account-refresh', check);
+    document.addEventListener('visibilitychange', check);
+    return () => { cancelled = true; controller.abort(); clearInterval(timer); window.removeEventListener('focus', check); window.removeEventListener('bairui:account-refresh', check); document.removeEventListener('visibilitychange', check); };
+  }, [user?.userId]);
   const agent = useMemo(() => agents.find((item) => item.id === selectedId) ?? null, [agents, selectedId]);
   const activeResources = useMemo(() => resources.filter((item) => item.status === 'active').length, [resources]);
   const resourceCounts = useMemo(() => {
@@ -207,6 +227,7 @@ export function App() {
   if (loading) return <div className="console-loading"><LoaderCircle className="spin" /><span>正在连接 BaiRui 控制台...</span></div>;
   if (!user) return <LoginPage onAuthenticated={(next) => void handleAuthenticated(next)} />;
   return <CapabilitiesContext.Provider value={capabilities}><div className="console-app">
+    {user.accountStatus === 'suspended' && <div className="account-restriction" role="status"><ShieldCheck size={18} /><span>账号服务已暂停，当前仅可查看本人历史数据。请联系支持人员处理。</span></div>}
     <header className="console-topbar">
       <div className="console-topbar-left">
         <div className="console-brand"><span className="console-mark">BR</span><div><strong>BaiRui</strong><small>Agent Cloud</small></div></div>

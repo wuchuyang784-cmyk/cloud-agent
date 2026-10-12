@@ -32,6 +32,7 @@ export interface User {
   role: string;
   email: string;
   organizations?: Organization[];
+  accountStatus?: 'active' | 'suspended';
 }
 
 export interface BackendAgent {
@@ -166,6 +167,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: 'include',
     headers: { accept: 'application/json', ...init.headers },
   });
+  init.signal?.throwIfAborted();
 
   if (!response.ok) {
     if (response.status === 401 && typeof window !== 'undefined') {
@@ -180,6 +182,12 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     } catch {
       // Keep the HTTP status when the server did not return JSON.
     }
+    if (code === 'account_suspended') {
+      message = '账号服务已暂停，当前仅可查看本人历史数据。';
+      if (typeof window !== 'undefined') window.dispatchEvent(new Event('bairui:account-refresh'));
+    }
+    if (code === 'account_banned') message = '账号已封禁，请联系平台管理员。';
+    if (code === 'governance_unavailable') message = '账号权限暂时无法确认，请稍后重试。';
     const error = new Error(message) as ApiError;
     error.status = response.status;
     if (code) error.code = code;
@@ -232,9 +240,9 @@ export async function fetchHealth(): Promise<{ status: string; database: string 
 }
 
 // 读取当前会话。未登录（401）返回 null，其他错误继续抛出，避免把网络故障误判成"未登录"。
-export async function fetchCurrentUser(): Promise<User | null> {
+export async function fetchCurrentUser(signal?: AbortSignal): Promise<User | null> {
   try {
-    return (await request<{ user: User }>('/api/auth/me')).user;
+    return (await request<{ user: User }>('/api/auth/me', { signal, cache: 'no-store' })).user;
   } catch (error) {
     if ((error as ApiError).status === 401) return null;
     throw error;

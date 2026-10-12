@@ -10,7 +10,9 @@ const exec = promisify(execFile);
 const { Client } = createRequire(new URL('../apps/platform-api/package.json', import.meta.url))('pg');
 const adminCheck = process.argv.includes('--admin');
 const clientMonitoringCheck = process.argv.includes('--client-monitoring');
-const platformCheck = process.argv.includes('--platform') || adminCheck || clientMonitoringCheck;
+const infrastructureCheck = process.argv.includes('--infrastructure');
+const governanceCheck = process.argv.includes('--governance');
+const platformCheck = process.argv.includes('--platform') || adminCheck || clientMonitoringCheck || infrastructureCheck || governanceCheck;
 const name = (platformCheck ? 'bairui-platform-test-' : 'bairui-scheduler-test-') + randomBytes(6).toString('hex');
 const password = randomBytes(24).toString('hex');
 const env = { ...process.env, POSTGRES_PASSWORD: password };
@@ -29,12 +31,20 @@ try {
     connectionTimeoutMillis: 2000,
     query_timeout: 2000,
   }));
+  // Extensions are database-wide: concurrent schema fixtures must not race to create one.
+  const setup = new Client({ connectionString: env.BAIRUI_SCHEDULER_TEST_DATABASE_URL });
+  try {
+    await setup.connect();
+    await setup.query('CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public');
+  } finally { await setup.end(); }
   console.log('一次性测试数据库已就绪；不会连接项目 .env 中的数据库。');
   const code = await new Promise((resolve, reject) => {
-    const tests = clientMonitoringCheck ? ['apps/platform-api/test/client-monitoring.test.mjs', 'apps/platform-api/test/client-monitoring-postgres.test.mjs'] : adminCheck ? ['apps/platform-api/test/admin.test.mjs', 'apps/platform-api/test/admin-postgres.test.mjs'] : platformCheck
+    const tests = governanceCheck ? ['apps/platform-api/test/governance.test.mjs', 'apps/platform-api/test/governance-postgres.test.mjs'] : infrastructureCheck ? ['scripts/infrastructure-collector.test.mjs'] : clientMonitoringCheck ? ['apps/platform-api/test/client-monitoring.test.mjs', 'apps/platform-api/test/client-monitoring-postgres.test.mjs'] : adminCheck ? ['apps/platform-api/test/admin.test.mjs', 'apps/platform-api/test/admin-monitoring.test.mjs', 'apps/platform-api/test/admin-monitoring-access.test.mjs', 'apps/platform-api/test/admin-postgres.test.mjs'] : platformCheck
       ? ['scripts/dev-services.test.mjs', 'scripts/setup-env.test.mjs', 'apps/platform-api/test/platform-mode.test.mjs', 'apps/platform-api/test/auth-proxy.test.mjs', 'apps/platform-api/test/auth-database.test.mjs', 'apps/platform-api/test/better-auth-postgres.test.mjs']
-      : ['scripts/postgres-ready.test.mjs', 'apps/platform-api/test/scheduler.test.mjs', 'apps/platform-api/test/scheduler-api.test.mjs', 'apps/platform-api/test/scheduler-postgres.test.mjs'];
-    const child = spawn(process.execPath, ['--test', ...tests], {
+      : ['scripts/postgres-ready.test.mjs', 'apps/platform-api/test/scheduler.test.mjs', 'apps/platform-api/test/scheduler-api.test.mjs', 'apps/platform-api/test/scheduler-postgres.test.mjs', 'apps/platform-api/test/scheduler-governance-postgres.test.mjs'];
+    // Scheduler suites share the database-wide decision lock even across fixture schemas.
+    // Run files sequentially; each suite still exercises concurrent pools/replicas internally.
+    const child = spawn(process.execPath, ['--test', ...(!platformCheck ? ['--test-concurrency=1'] : []), ...tests], {
       cwd: fileURLToPath(new URL('../', import.meta.url)), env, stdio: 'inherit', windowsHide: true,
     });
     child.once('error', reject);

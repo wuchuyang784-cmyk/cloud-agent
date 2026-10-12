@@ -1,0 +1,8 @@
+*
+!Dockerfile
+!pi-source.tar
+!provenance.json
+!production/
+!production/*.mjs
+!model-data/
+!model-data/*.json

@@ -16,11 +16,13 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+!.env.infrastructure.example
 
 # local tool / generated data
 .codebuddy/
 .playwright-cli/
 output/
+backups/
 
 # OS / editor
 .DS_Store

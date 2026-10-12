@@ -72,6 +72,9 @@ test('client monitoring PostgreSQL: restricted role, dual APIs, scoped aggregate
     const noScope = await pool.query("SELECT current_setting('app.user_id', true) AS scope, current_setting('statement_timeout') AS timeout");
     assert.equal(noScope.rows[0].scope, '');
     assert.equal(noScope.rows[0].timeout, '0');
+    // Store reads still work without admin tables; the current API also requires D1 account admission.
+    for (const file of ['034_platform_admin.sql', '036_account_governance.sql']) await elevated.query(await readFile(new URL(file, migrations), 'utf8'));
+    await elevated.query('GRANT EXECUTE ON FUNCTION platform_account_access(text) TO ' + role);
     const auth = { provider: 'better-auth', async resolve(req) {
       return ['user-a', 'user-b'].includes(req.headers['x-test-user']) ? { userId: req.headers['x-test-user'], organizationId: 'org-a' } : null;
     } };

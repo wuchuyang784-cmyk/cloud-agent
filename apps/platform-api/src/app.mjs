@@ -11,7 +11,10 @@ import { createTelemetry, metricsConfiguration } from './observability/metrics.m
 import { routeLabel } from './observability/labels.mjs';
 import { safeLog } from './observability/safe-log.mjs';
 import { handleAdmin } from './admin/routes.mjs';
+import { createAdminMonitoring } from './admin/monitoring.mjs';
+import { createGrafanaProxy } from './admin/grafana-proxy.mjs';
 import { handleClientMonitoring } from './monitoring/client-routes.mjs';
+import { accountAccess, GovernanceError } from './admin/governance.mjs';
 
 function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
@@ -154,6 +157,9 @@ export function createApp(options = {}) {
   const tasks = simulationEnabled ? (options.taskStore ?? (store instanceof PostgresStore ? new PostgresTaskStore(store.pool) : new MemoryTaskStore())) : null;
   const ready = createReadiness(store, options.readinessTimeoutMs ?? 2000);
   const telemetry = createTelemetry(metricsConfig, store, { readinessTimeoutMs: options.metricsReadinessTimeoutMs });
+  const adminMonitoring = options.adminMonitoring ?? createAdminMonitoring({ baseUrl: env.BAIRUI_PROMETHEUS_URL, token: env.BAIRUI_MONITORING_PROXY_TOKEN });
+  const grafana = createGrafanaProxy({ baseUrl: env.BAIRUI_GRAFANA_UPSTREAM_URL, token: env.BAIRUI_MONITORING_PROXY_TOKEN,
+    publicOrigin: env.BAIRUI_GRAFANA_PUBLIC_ORIGIN });
   let draining = false;
 
   const server = createServer(async (request, response) => {
@@ -183,6 +189,13 @@ export function createApp(options = {}) {
         return await auth.handle(request, response, path, maxBodyBytes);
       }
       const principal = await auth.resolve(request);
+      if (principal && auth.provider === 'better-auth') {
+        const account = await accountAccess(store, principal.userId);
+        response.setHeader('cache-control', 'no-store');
+        if (account.status === 'banned') return sendError(response, 401, 'account_banned', 'Account access is restricted', requestId);
+        principal.accountStatus = account.status;
+        if (account.status === 'suspended' && !['GET', 'HEAD'].includes(request.method)) return sendError(response, 403, 'account_suspended', 'Account is read-only', requestId);
+      }
       const scope = principal && { userId: principal.userId, organizationId: principal.organizationId };
 
       // 注册：创建个人组织与账号并直接签发会话。生产环境同样可用，
@@ -236,7 +249,7 @@ export function createApp(options = {}) {
 
       if (path.startsWith('/api/admin/')) {
         return await handleAdmin({ request, response, url, principal, store,
-          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId });
+          enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId, env, readJson, monitoring: adminMonitoring, grafana });
       }
       if (!principal) return sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
 
@@ -604,8 +617,12 @@ export function createApp(options = {}) {
 
       return sendError(response, 404, 'not_found', 'Not found', requestId);
     } catch (caught) {
+      if (caught instanceof GovernanceError) return sendError(response, caught.status, caught.code, caught.code, requestId);
       if (caught.message === 'invalid_client_ip') return sendError(response, 400, 'invalid_client_ip', 'Invalid client address', requestId);
-      if (caught instanceof TaskError) return sendError(response, caught.code === 'queue_full' ? 429 : caught.code === 'idempotency_conflict' ? 409 : 422, caught.code, caught.code, requestId);
+      if (caught instanceof TaskError) {
+        const taskStatus = caught.code === 'queue_full' ? 429 : caught.code === 'idempotency_conflict' ? 409 : ['account_suspended', 'account_banned'].includes(caught.code) ? 403 : caught.code === 'governance_unavailable' ? 503 : 422;
+        return sendError(response, taskStatus, caught.code, caught.code, requestId);
+      }
       if (caught.message === 'identity_link_required') return sendError(response, 409, 'identity_link_required', 'Account migration requires verified identity linking', requestId);
       if (caught.message === 'invalid_json') return sendError(response, 400, 'invalid_json', 'Request body must be valid JSON', requestId);
       if (caught.message === 'payload_too_large') return sendError(response, 413, 'payload_too_large', 'Request body is too large', requestId);

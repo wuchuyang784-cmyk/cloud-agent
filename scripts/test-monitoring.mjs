@@ -7,6 +7,8 @@ import { names, apiImage } from './preprod-config.mjs';
 import { monitorNames, monitorServices, monitorSecrets, monitorImages, monitorOrigin } from './monitoring-config.mjs';
 import { assertMonitoringResources, alertRecords, grafanaPassword } from './monitoring.mjs';
 import { validateMonitoring } from './monitoring-rules.test.mjs';
+import { runWithKeepAlive } from './cli-keepalive.mjs';
+import { grafanaAdminLogin, grafanaSessionCookie } from './preprod-acceptance.mjs';
 
 const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomBytes(3).toString('hex');
 const report = { runId, success: false, startedAt: new Date().toISOString(), checks: [] };
@@ -32,7 +34,7 @@ async function verify() {
   const local = await localDocker();
   assert.equal(local.nodeId, state.nodeId); assert.equal(local.endpoint, state.endpoint);
   await assertMonitoringResources(state);
-  await validateMonitoring();
+  await validateMonitoring(state.monitoring.runtime);
   const gateway = await owned('container', names.gateway, state);
   for (const [port, host] of [['443/tcp', '8443'], ['9443/tcp', '9443']]) {
     assert.deepEqual(gateway.HostConfig.PortBindings[port], [{ HostIp: '127.0.0.1', HostPort: host }]);
@@ -52,7 +54,9 @@ async function verify() {
   const unauth = await request(monitorOrigin + '/api/datasources');
   assert.ok([401, 403].includes(unauth.status));
   const password = await grafanaPassword(state);
-  const headers = { authorization: 'Basic ' + Buffer.from('admin:' + password).toString('base64'), origin: monitorOrigin };
+  const login = await request(monitorOrigin + '/login', grafanaAdminLogin(password));
+  assert.equal(login.status, 200);
+  const headers = { cookie: grafanaSessionCookie(login.headers), origin: monitorOrigin };
   const dashboard = await request(monitorOrigin + '/api/dashboards/uid/bairui-platform', { headers });
   assert.equal(dashboard.status, 200);
   assert.ok(JSON.parse(dashboard.text).dashboard.panels.length >= 8);
@@ -134,7 +138,7 @@ async function verify() {
   report.success = true;
 }
 
-await withLock(async () => {
+await runWithKeepAlive(() => withLock(async () => {
   try { await verify(); }
   catch (error) { report.success = false; report.error = error.message; console.error('监控验收失败：' + error.message); process.exitCode = 1; }
   finally {
@@ -143,4 +147,4 @@ await withLock(async () => {
     await writeFile(path, JSON.stringify(report, null, 2) + '\n');
     console.log('脱敏验收报告：' + path);
   }
-}).catch(error => { console.error(error.message); process.exitCode = 1; });
+})).catch(error => { console.error(error.message); process.exitCode = 1; });

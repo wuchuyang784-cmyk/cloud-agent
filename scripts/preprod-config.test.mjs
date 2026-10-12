@@ -5,10 +5,12 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
+import { join } from 'node:path';
 import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocker, names } from './preprod-config.mjs';
 import { missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
-import { up, paths } from './preprod.mjs';
+import { up, paths, root, revisionDirectories, revisionFiles } from './preprod.mjs';
 import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
+import { viewerGrantCommand, grafanaAdminLogin, grafanaSessionCookie } from './preprod-acceptance.mjs';
 
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
 
@@ -65,6 +67,35 @@ test('gateway serves HTTPS/static assets and separates API routing', () => {
   assert.ok(config.indexOf('handle_path /admin/*') < config.indexOf('root * /srv\n'));
 });
 
+test('preprod revision includes all admin console source and build inputs', () => {
+  assert.ok(revisionDirectories.includes('apps/admin-console/src'));
+  for (const name of ['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'vite.config.ts']) {
+    assert.ok(revisionFiles.includes('apps/admin-console/' + name), name);
+  }
+});
+
+test('every preprod revision input exists in the real repository layout', async () => {
+  for (const directory of revisionDirectories) await fs.access(join(root, directory));
+  for (const file of revisionFiles) await fs.access(join(root, file));
+});
+
+test('preprod Viewer grant sends psql variables through stdin instead of -c', () => {
+  const command = viewerGrantCommand('a'.repeat(64), 'user-123');
+  assert.deepEqual(command.args.slice(0, 3), ['exec', '-i', 'a'.repeat(64)]);
+  assert.ok(!command.args.includes('-c'));
+  assert.ok(command.args.includes('--set=uid=user-123'));
+  assert.match(command.input, /VALUES \(:'uid'/);
+});
+
+test('monitoring acceptance uses the Grafana emergency session instead of Basic auth', () => {
+  const login = grafanaAdminLogin('a'.repeat(32));
+  assert.equal(login.method, 'POST');
+  assert.equal(login.headers['content-type'], 'application/json');
+  assert.deepEqual(JSON.parse(login.body), { user: 'admin', password: 'a'.repeat(32) });
+  assert.equal(grafanaSessionCookie({ 'set-cookie': ['grafana_session=session-token; Path=/; Secure; HttpOnly'] }), 'grafana_session=session-token');
+  assert.throws(() => grafanaSessionCookie({}), /grafana_admin_session_missing/);
+});
+
 test('bootstrap uses file secrets and a restricted role in the independent database', () => {
   const sql = bootstrapSql([{ name: '001.sql', sql: 'SELECT 1;' }], input.schemaHash);
   assert.ok(sql.includes('NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS'));
@@ -76,6 +107,12 @@ test('bootstrap uses file secrets and a restricted role in the independent datab
   const revoke = 'REVOKE ALL ON TABLE public.platform_role_bindings, public.platform_admin_audit FROM bairui_preprod_app;';
   assert.ok(sql.includes(revoke));
   assert.ok(sql.indexOf(revoke) > sql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES'));
+  for (const fn of ['platform_account_access(text)', 'platform_account_session_allowed(text)', 'platform_governance_accounts(text,text[])',
+    'platform_governance_read(text,text,bigint)', 'platform_governance_change(text,text,text,integer,text,uuid)']) assert.ok(sql.includes('public.' + fn));
+  const governanceRevoke = 'REVOKE ALL ON TABLE public.platform_account_governance, public.platform_governance_audit FROM bairui_preprod_app;';
+  assert.ok(sql.indexOf(governanceRevoke) > sql.indexOf('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES'));
+  assert.ok(sql.indexOf('REVOKE ALL ON SEQUENCE public.platform_governance_audit_id_seq FROM bairui_preprod_app;')
+    > sql.indexOf('GRANT USAGE, SELECT ON ALL SEQUENCES'));
 });
 
 test('ownership and local single-node checks fail closed', () => {
@@ -88,12 +125,19 @@ test('ownership and local single-node checks fail closed', () => {
   assert.throws(() => assertLocalDocker({ ...info, Swarm: { ...info.Swarm, Nodes: 2 } }, 'unix:///var/run/docker.sock'));
 });
 
-function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.caddyVolume], imagePrefix, imageLabels, missingImages = false, monitoring, absent = [] } = {}) {
+function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.caddyVolume], imagePrefix, imageLabels, missingImages = false, monitoring, absent = [], currentGatewayImage = false, recreatedProxyIp = '10.0.1.3' } = {}) {
   const installation = 'a'.repeat(24), labels = { 'bairui.preprod.installation': installation };
   const endpoint = 'npipe:////./pipe/dockerDesktopLinuxEngine';
   const state = { version: 1, installation, phase, secretsReady: true, nodeId: 'local-node', endpoint,
     schemaHash: createHash('sha256').update('[]').digest('hex'), ...(monitoring ? { monitoring } : {}) };
   const existingVolumes = new Set(volumes), commands = [], mutations = [], writes = [];
+  // The fixture supplies empty directories/files to the real revision calculation.
+  const hash = createHash('sha256').update(gatewayConfig(state));
+  for (const file of ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
+    ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f),
+    ...['package.json', 'package-lock.json', 'index.html', 'tsconfig.json', 'vite.config.ts'].map(f => 'apps/admin-console/' + f)]) hash.update(file);
+  const gatewayImage = currentGatewayImage ? 'bairui/platform-web-preprod:' + hash.digest('hex').slice(0, 16) : 'previous-web-image';
+  let recreated = false, monitorConnected = false;
   const missing = (kind, name) => { throw new Error('No such ' + kind + ': ' + name); };
   function respond(args) {
     commands.push(args);
@@ -110,13 +154,16 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
         if (missingImages) return missing(kind, name);
         return JSON.stringify({ Labels: labels, Config: { Labels: name.startsWith(imagePrefix ?? '!') ? imageLabels : labels } });
       }
-      if (kind === 'container') return JSON.stringify({ Config: { Labels: labels, Image: 'previous-web-image' },
-        State: { Running: phase !== 'stopped' }, NetworkSettings: { Networks: { [names.edge]: { IPAddress: '10.0.1.3' } } } });
+      if (kind === 'container') return JSON.stringify({ Config: { Labels: labels, Image: gatewayImage },
+        State: { Running: recreated || phase !== 'stopped' }, NetworkSettings: { Networks: { [names.edge]: { IPAddress: recreated ? recreatedProxyIp : '10.0.1.3' },
+          ...(monitorConnected ? { [monitorNames.network]: { IPAddress: '10.0.3.9' } } : {}) } } });
       if (kind === 'network') return JSON.stringify({ Labels: labels, Driver: 'overlay', Attachable: true, Internal: name === names.data || name === monitorNames.network });
       return JSON.stringify({ Labels: labels, Spec: { Labels: labels } });
     }
     if (kind === 'stack' && action === 'config') return '';
     mutations.push(args);
+    if (kind === 'run') recreated = true;
+    if (kind === 'network' && action === 'connect' && name === monitorNames.network) monitorConnected = true;
     if (kind === 'stack' && action === 'deploy') throw new Error('unit_test_deployment_boundary');
     if (kind === 'volume' && action === 'create') existingVolumes.add(args.at(-1));
     return '';
@@ -168,6 +215,20 @@ test('preprod up keeps monitoring attached and pauses API before gateway replace
   const gateway = fixture.mutations.find(args => args[0] === 'run');
   assert.ok(gateway.includes('127.0.0.1:9443:9443'));
   assert.ok(!fixture.mutations.some(args => ['volume', 'secret'].includes(args[0])));
+});
+
+test('stopped same-image gateway is recreated with persistent data and a newly trusted proxy IP', async t => {
+  const fixture = recoveryFixture(t, { phase: 'stopped', currentGatewayImage: true, recreatedProxyIp: '10.0.1.9' });
+  await assert.rejects(up(), /stack deploy/);
+  const pause = fixture.mutations.findIndex(args => args[0] === 'service' && args[1] === 'scale' && args.includes(names.api + '=0'));
+  const remove = fixture.mutations.findIndex(args => args[0] === 'container' && args[1] === 'rm' && args[2] === names.gateway);
+  const run = fixture.mutations.findIndex(args => args[0] === 'run');
+  assert.ok(pause >= 0 && remove > pause && run > remove, 'stopped gateway must be recreated after API is paused');
+  assert.ok(!fixture.mutations.some(args => args[0] === 'container' && args[1] === 'start'));
+  assert.ok(!fixture.mutations.some(args => ['volume', 'secret'].includes(args[0])));
+  assert.ok(fixture.mutations[run].includes('type=volume,source=' + names.caddyVolume + ',target=/data'));
+  const stack = JSON.parse(fixture.writes.find(w => w.path === paths.stack).data);
+  assert.equal(stack.services.api.environment.BAIRUI_TRUSTED_PROXIES, '10.0.1.9/32');
 });
 
 for (const phase of ['running', 'stopped']) {
