@@ -4,11 +4,11 @@
 
 ## 1. 来源与构建
 
-可执行代码来自 `upstreams/pi` 的固定 Git 提交 `c1d4c801114545f47c440921d8b3e04aeb1e565d`，coding-agent 为 0.85.1，锁文件 SHA-256 为 `f7e0d7faf7293581715d53ddf3f76bbb7dc14d79ded9c2ac1303756c21e9fed1`。构建前后检查 Git HEAD、索引/gitlink、版本、锁文件和工作树；脏目录或变更的 pin 被拒绝，不更新子模块。
+可执行代码来自 `upstreams/pi` 的固定 Git 提交 `11f99114506ad2cc759cb389663edaf7546cbe8c`，coding-agent 为 1.1.0，锁文件 SHA-256 为 `7b597edc7527a36d9fba52f7e0fc9732447065fd96e4e6abc976cdcd14676b6b`。构建前后检查 Git HEAD、索引/gitlink、版本、锁文件和工作树；脏目录或变更的 pin 被拒绝，不更新子模块。
 
 基础 Node 镜像固定 digest。构建脚本只将已提交源码 archive、wrapper、固定构建定义及模型目录数据放入随机临时目录；不将平台 `.env`、数据库、输出目录或 Git 私有配置作为构建上下文。只允许本机 Docker endpoint。
 
-上游没有在 Git 中提交编译必需的 provider JSON。构建仅提取 `@earendil-works/pi-ai@0.85.1` 发布包里的 40 个目录 JSON（含 manifest），不运行/安装其中 JS，固定 SHA-512 并逐文件校验 SHA-256。目录发布提交是 `d981de1229ef899957bbe968bc8dcda02a21f477`，不同于上述主源码提交；两者分别记录，不能声称目录数据也来自主源码 Git archive。上游 `check:model-data` 继续执行，不跳过检查，不每次联网生成变化中的目录。
+上游没有在 Git 中提交编译必需的 provider JSON。构建仅提取 `@earendil-works/pi-ai@1.1.0` 发布包里的 43 个目录 JSON（含 manifest），不运行/安装其中 JS，固定 SHA-512 并逐文件校验 SHA-256。模型目录数据独立固定到 npm 发布包，不将其冒充主源码 Git archive 内容。上游 `check:model-data` 继续执行，不跳过检查，不每次联网生成变化中的目录。
 
 显式执行 `npm ci --ignore-scripts`、上游 `build:offline` 与生产依赖清理；旧 npm 全局安装镜像不作为 F1 产物。镜像默认 UID/GID 1000，工作空间 `/workspace`、状态 `/agent-state`，独立入口 `/app/pi/production/index.mjs`。
 
@@ -69,7 +69,7 @@ Runtime 只加入新建 internal 网络，无宿主端口。可信 fixture 另�
 
 F1 未提供安全的多租户用户上线：pi、wrapper 和状态文件仍同 UID，工具可能访问自身状态和控制 token；生产必须先完成 F3 的控制 Secret/可信配置与工具空间隔离，不能仅靠 Docker 参数宣布沙箱完成。真实 Provider、账号→容器授权、配额准入、跨用户拒绝、Linux/gVisor、出口策略、磁盘配额、资源挂载和页面留待后续。
 
-## 6. 本批结果（2026-10-11）
+## 6. 首次结果（2026-10-11）
 
 - `test:pi`：48 项通过，0 失败、0 跳过；涵盖构建来源、协议、持久状态、取消竞争、输出限制、慢客户端和夹具。测试启动使用条件等待，不用延时后初始 503 冒充握手拒绝；生产 RPC 超时未放宽。
 - 慢客户端回归曾由 Windows 测试观察器反复打开目标文件触发原子 `rename` 的 `EPERM`；实际 wrapper 返回 `persistence_failed`、关闭就绪并保留 unknown，占位未误写成功。观察器改为先检查文件元数据再读取替换结果，仍在客户端暂停时断言终态已持久化，保留 800 毫秒任务、200 毫秒取消和 5 秒观察期限；不通过修改生产代码或放宽期限消除失败。
@@ -82,3 +82,11 @@ F1 未提供安全的多租户用户上线：pi、wrapper 和状态文件仍同 
 本批没有迁移业务库、更新常驻预发、访问 Linux 服务器、开放用户执行、提交或推送。实现遵循独立开发、测试先行和审查后验收流程；工作保留在当前分支，既有 Grafana 修改不被覆盖。
 
 下一批 F2：用户凭据保险库与模型网关；继续复用 Better Auth/Principal/RLS 绑定本人凭据，并签发只适用于确定 Agent/run 的短期网关 token，原始 API Key 不交给 pi 容器。
+
+## 7. 1.1.0 复验结果（2026-10-13）
+
+- `upstreams/pi` 已在工作树和 staged gitlink 中核对为 `11f99114506ad2cc759cb389663edaf7546cbe8c`，coding-agent 为 1.1.0，锁文件 SHA-256 为 `7b597edc7527a36d9fba52f7e0fc9732447065fd96e4e6abc976cdcd14676b6b`；同版本 pi-ai 模型目录为 43 个 JSON，未带入 JS。
+- `test:pi`：53 项通过、0 失败、0 跳过；覆盖 1.1.0 的 `started/queued/handled` prompt disposition、未知 disposition fail-closed、usage/context_edit session 条目、固定 CLI argv，以及既有 HMAC、会话、取消、超时、流式输出和边界测试。`npm run pi:source:check` 通过。
+- 最终 `npm run pi:build` 使用普通容器网络构建成功，未使用 `network.host`；镜像为 `bairui/pi-runtime-f1:611ce4ff34317c36d8ef`，image ID 为 `sha256:e696b993afc8ccecea5e8236e8139e45f485175bec078db7bfb61ac74504a903`，报告为 `output/pi-runtime/builds/611ce4ff34317c36d8ef.json`。
+- `npm run test:pi:live` 使用该最终镜像完成 16/16 检查：真实 pi RPC 就绪、read/write/bash 工具、流式与多轮 usage、持久会话重启恢复、取消/执行超时、Provider 错误脱敏且不重试、RPC 溢出 fail-closed、非 root/只读策略和临时资源清理均通过。报告为 `output/pi-runtime/acceptance/2026-10-13T02-03-27-348Z.json`。
+- 本次没有迁移业务库、更新常驻预发、启动用户 Agent 或推送镜像；仍未验收 arm64、真实付费 Provider、F3 级进程树/网络/控制 Secret 隔离和生产部署。

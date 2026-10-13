@@ -76,10 +76,10 @@ export async function testPiRuntimeLive() {
     networks.push(network);
     const ingressNetwork = await cli(['network', 'create', '--label', owner + '=' + installation, installation + '-ingress']); networks.push(ingressNetwork);
     for (const name of [names.workspace, names.state]) { await cli(['volume', 'create', '--label', owner + '=' + installation, name]); volumes.push(name); }
-    const base = (await inspect('image', piSource.baseImage)).Id;
     const provider = await cli(['run', '--pull=never', '-d', '--init', '--name', names.provider, '--label', owner + '=' + installation,
       '--network', ingressNetwork, '--user', '1000:1000', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-      '--memory', '128m', '--pids-limit', '64', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m', '--mount', 'type=bind,src=' + directory + ',dst=/fixture,readonly', '-p', '127.0.0.1::8088', '-p', '127.0.0.1::8089', base, 'node', '/fixture/provider.mjs']);
+      '--memory', '128m', '--pids-limit', '64', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m', '--mount', 'type=bind,src=' + directory + ',dst=/fixture,readonly', '-p', '127.0.0.1::8088', '-p', '127.0.0.1::8089',
+      '--entrypoint', 'node', image, '/fixture/provider.mjs']);
     assert.match(provider, /^[a-f0-9]{64}$/); containers.push(provider);
     await cli(['network', 'connect', '--alias', 'pi-provider', network, provider]);
     const providerInfo = await until(async () => {

@@ -6,9 +6,9 @@ import { join } from 'node:path';
 // Upstream excludes generated provider JSON from Git. Use data (never JS) from
 // its immutable, same-version release; still run upstream's model-data validator.
 export const modelCatalog = Object.freeze({
-  version: '0.85.1', releaseGitHead: 'd981de1229ef899957bbe968bc8dcda02a21f477',
-  url: 'https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-0.85.1.tgz',
-  integrity: 'sha512-+VgVIJDkDO2efYJKEEqvPTH4zmnIaXdAppGbO+vKFA9qy5PdhFiAenuFAkU+oiCSfOC4dMHDyrjdQeL4ZoC5CQ==',
+  version: '1.1.0', entryCount: 43,
+  url: 'https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.1.0.tgz',
+  integrity: 'sha512-1T7LAkc/5Bvc0v6w4vAGVdCrli0o/E0pEmYKTnixu95vSFArBjvbhS/G4ZwI0RUePgf0Imcu0VyqlM4EcXxqfw==',
 });
 
 export function extractModelData(bytes) {
@@ -34,7 +34,7 @@ export function extractModelData(bytes) {
     }
     offset = start + Math.ceil(size / 512) * 512;
   }
-  if (entries.size !== 40 || !entries.has('.manifest.json')) throw new Error('pi_catalog_missing');
+  if (entries.size !== modelCatalog.entryCount || !entries.has('.manifest.json')) throw new Error('pi_catalog_missing');
   const manifest = JSON.parse(entries.get('.manifest.json'));
   for (const [name, content] of entries) {
     if (name === '.manifest.json') continue;
@@ -45,7 +45,7 @@ export function extractModelData(bytes) {
 
 export async function prepareModelData({ output, cache }) {
   await mkdir(cache, { recursive: true });
-  const cached = join(cache, 'pi-ai-0.85.1.tgz');
+  const cached = join(cache, `pi-ai-${modelCatalog.version}.tgz`);
   let bytes = await readFile(cached).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
   if (!bytes) {
     const response = await fetch(modelCatalog.url, { redirect: 'error', signal: AbortSignal.timeout(60000) });

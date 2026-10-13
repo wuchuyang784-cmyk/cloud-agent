@@ -49,7 +49,7 @@ export async function prepareRuntime(config, paths) {
     const lines = content.split('\n').filter(Boolean); if (!lines.length) throw new Error('invalid_session');
     const records = lines.map(line => JSON.parse(line));
     const header = records[0];
-    const entryTypes = ['message', 'thinking_level_change', 'model_change', 'compaction', 'branch_summary', 'custom', 'custom_message', 'label', 'session_info'];
+    const entryTypes = ['message', 'thinking_level_change', 'model_change', 'usage', 'compaction', 'branch_summary', 'custom', 'custom_message', 'context_edit', 'label', 'session_info'];
     const ids = new Set();
     if (header.type !== 'session' || header.version !== 3 || !UUID.test(header.id) || !Number.isFinite(Date.parse(header.timestamp)) || header.cwd !== paths.workspace) throw new Error('invalid_session');
     for (const entry of records.slice(1)) {

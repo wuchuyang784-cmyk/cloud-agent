@@ -1,14 +1,17 @@
 import { isAbsolute } from 'node:path';
 
 export const piSource = Object.freeze({
-  commit: 'c1d4c801114545f47c440921d8b3e04aeb1e565d', version: '0.85.1',
-  lockSha256: 'f7e0d7faf7293581715d53ddf3f76bbb7dc14d79ded9c2ac1303756c21e9fed1',
+  commit: '11f99114506ad2cc759cb389663edaf7546cbe8c', version: '1.1.0',
+  previousCommit: 'c1d4c801114545f47c440921d8b3e04aeb1e565d',
+  lockSha256: '7b597edc7527a36d9fba52f7e0fc9732447065fd96e4e6abc976cdcd14676b6b',
   baseImage: 'docker.m.daocloud.io/library/node@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553',
 });
 
 export function validatePiSource(source) {
   if (source.status !== '') throw new Error('pi_source_dirty');
-  if (source.gitlink !== piSource.commit || source.stagedGitlink !== piSource.commit || source.head !== piSource.commit
+  const committedPin = source.gitlink === piSource.commit && source.stagedGitlink === piSource.commit;
+  const stagedUpgrade = source.gitlink === piSource.previousCommit && source.stagedGitlink === piSource.commit;
+  if ((!committedPin && !stagedUpgrade) || source.head !== piSource.commit
     || source.version !== piSource.version || source.lockSha256 !== piSource.lockSha256) throw new Error('pi_source_unreviewed');
 }
 
