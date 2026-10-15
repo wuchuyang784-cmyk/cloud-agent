@@ -4,8 +4,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { withLock, loadState, localDocker, owned, containers, docker, request, waitReady, waitUntil, output, stop, up } from './preprod.mjs';
-import { names, origin, apiImage } from './preprod-config.mjs';
-import { monitorOrigin } from './monitoring-config.mjs';
+import { names, apiImage, gatewayPublish, consolePublicOrigin } from './preprod-config.mjs';
 import { authRetryDelay } from './swarm-scheduler-config.mjs';
 import { viewerGrantCommand } from './preprod-acceptance.mjs';
 
@@ -46,8 +45,9 @@ async function verify() {
   assert.equal(local.nodeId, state.nodeId); assert.equal(local.endpoint, state.endpoint);
   await owned('service', names.api, state); await owned('service', names.db, state);
   const gateway = await owned('container', names.gateway, state);
-  assert.equal(gateway.HostConfig.PortBindings['443/tcp'][0].HostIp, '127.0.0.1');
-  assert.equal(gateway.HostConfig.PortBindings['443/tcp'][0].HostPort, '8443');
+  const [hostIp, hostPort] = gatewayPublish(state.publicOrigin).split(':');
+  assert.deepEqual(gateway.HostConfig.PortBindings['443/tcp'], [{ HostIp: hostIp, HostPort: hostPort }]);
+  assert.deepEqual(Object.keys(gateway.HostConfig.PortBindings), ['443/tcp']);
   for (const name of [names.api, names.db]) {
     const service = await owned('service', name, state);
     assert.equal(service.Spec.EndpointSpec?.Ports?.length ?? 0, 0);
@@ -161,22 +161,21 @@ async function verify() {
     const grant = viewerGrantCommand(db.Id, users[1].scope.userId);
     await docker(grant.args, { input: grant.input });
     assert.equal((await api('/api/admin/me', { cookie: users[1].cookie })).body.role, 'platform_viewer');
-    const viewer = await request(monitorOrigin + '/api/user', { headers: { cookie: users[1].cookie } });
+    const viewer = await request('/api/admin/grafana/api/user', { headers: { cookie: users[1].cookie } });
     assert.equal(viewer.status, 200);
     assert.equal(JSON.parse(viewer.text).login, 'bairui:' + users[1].scope.userId);
-    const orgs = await request(monitorOrigin + '/api/user/orgs', { headers: { cookie: users[1].cookie } });
+    const orgs = await request('/api/admin/grafana/api/user/orgs', { headers: { cookie: users[1].cookie } });
     assert.equal(JSON.parse(orgs.text)[0].role, 'Viewer');
-    assert.equal((await request(monitorOrigin + '/api/user', { headers: { 'x-bairui-monitor-user': 'bairui:forged' } })).status, 401);
-    assert.equal((await request(monitorOrigin + '/login')).status, 200);
+    assert.equal((await request('/api/admin/grafana/api/user', { headers: { 'x-bairui-monitor-user': 'bairui:forged' } })).status, 401);
+    assert.equal((await request('/api/admin/grafana/login', { headers: { cookie: users[1].cookie } })).status, 404);
     await api('/api/auth/sign-out', { method: 'POST', cookie: users[1].cookie, body: {} });
-    assert.equal((await request(monitorOrigin + '/api/user', { headers: { cookie: users[1].cookie } })).status, 401);
-    assert.equal((await request(monitorOrigin + '/login')).status, 200);
-    passed('统一监控 Viewer、伪造身份拒绝、退出即时失效与独立应急登录可达');
+    assert.equal((await request('/api/admin/grafana/api/user', { headers: { cookie: users[1].cookie } })).status, 401);
+    passed('同源监控 Viewer、伪造身份拒绝、退出即时失效且无独立 Grafana 登录');
   }
   report.success = true;
   report.installation = state.installation;
   report.revision = state.revision;
-  report.url = origin;
+  report.url = consolePublicOrigin(state.publicOrigin);
   report.testUsers = 2;
   report.testResourceId = resource.id;
 }

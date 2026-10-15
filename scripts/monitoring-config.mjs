@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { runtimeRules } from './runtime-monitoring-config.mjs';
 import { runtimeNames } from './runtime-deployment-config.mjs';
+import { monitoringPublicOrigin } from '../apps/platform-api/src/admin/monitoring-origin.mjs';
 
-export const monitorOrigin = 'https://localhost:9443';
 export const monitorNames = Object.freeze({
   stack: 'bairui-monitor', network: 'bairui-preprod-monitor',
   prometheus: 'bairui-monitor_prometheus', grafana: 'bairui-monitor_grafana',
@@ -57,6 +57,7 @@ export function monitoringAssets(runtime) {
       staticJob('grafana', monitorNames.grafana + ':3000'),
     ],
   };
+  prometheus.scrape_configs.find(job => job.job_name === 'grafana').metrics_path = '/api/admin/grafana/metrics';
   if (environments.length) {
     rules.groups.push(...runtimeRules().groups);
     for (const environment of environments) prometheus.scrape_configs.push({
@@ -100,14 +101,15 @@ export function monitoringAssets(runtime) {
     'prometheus.json': prometheus, 'rules.json': rules, 'alertmanager.json': alertmanager, 'dashboard.json': dashboard,
     'datasources.json': { apiVersion: 1, datasources: [{ ...datasource, name: 'BaiRui Prometheus', access: 'proxy',
       url: 'http://' + monitorNames.prometheus + ':9090', isDefault: true, editable: false, jsonData: { timeInterval: '15s' } }] },
-    'dashboards.json': { apiVersion: 1, providers: [{ name: 'bairui', orgId: 1, folder: 'BaiRui', type: 'file', disableDeletion: true, allowUiUpdates: false, options: { path: '/etc/bairui/dashboards' } }] },
+    'dashboards.json': { apiVersion: 1, providers: [{ name: 'bairui', orgId: 1, folder: 'BaiRui 平台监控', folderUid: 'bairui-platform-folder', type: 'file', disableDeletion: true, allowUiUpdates: false, options: { path: '/etc/bairui/dashboards' } }] },
   };
 }
 
 export const monitoringRevision = runtime => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(runtime), images: monitorImages })).digest('hex').slice(0, 16);
 export const monitorConfigName = (name, runtime) => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision(runtime);
 
-export function monitoringStack({ installation, nodeId, revision, monitoring }) {
+export function monitoringStack({ installation, nodeId, revision, monitoring, publicOrigin = 'https://localhost:8443' }) {
+  const consoleOrigin = monitoringPublicOrigin(publicOrigin);
   const environments = runtimeEnvironments(monitoring?.runtime);
   assert.match(installation, /^[a-f0-9]{24}$/); assert.match(nodeId, /^[a-z0-9-]+$/); assert.match(revision, /^[a-f0-9]{16}$/);
   assert.ok(isIP(monitoring?.gatewayIp) === 4 && !/^(0|127|169|224|255)\./.test(monitoring.gatewayIp), 'exact_monitor_gateway_ip_required');
@@ -135,7 +137,8 @@ export function monitoringStack({ installation, nodeId, revision, monitoring }) 
         secrets: [secret('alert_token', 'alert-token', '65534')], healthcheck: health(9093, '/-/ready'),
       },
       grafana: { ...service(monitorImages.grafana, '472:472', '384M', '0.50'),
-        environment: { GF_SERVER_ROOT_URL: monitorOrigin, GF_SECURITY_ADMIN_USER: 'admin', GF_SECURITY_ADMIN_PASSWORD__FILE: '/run/secrets/grafana-password',
+        environment: { GF_SERVER_ROOT_URL: consoleOrigin + '/api/admin/grafana/', GF_SERVER_SERVE_FROM_SUB_PATH: 'true',
+          GF_SECURITY_ADMIN_USER: 'admin', GF_SECURITY_ADMIN_PASSWORD__FILE: '/run/secrets/grafana-password',
           GF_SECURITY_COOKIE_SECURE: 'true', GF_SECURITY_COOKIE_SAMESITE: 'strict', GF_AUTH_ANONYMOUS_ENABLED: 'false', GF_USERS_ALLOW_SIGN_UP: 'false',
           GF_AUTH_PROXY_ENABLED: 'true', GF_AUTH_PROXY_HEADER_NAME: 'X-Bairui-Monitor-User', GF_AUTH_PROXY_HEADER_PROPERTY: 'username',
           GF_AUTH_PROXY_AUTO_SIGN_UP: 'true', GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN: 'false', GF_USERS_AUTO_ASSIGN_ORG_ROLE: 'Viewer',
@@ -145,11 +148,11 @@ export function monitoringStack({ installation, nodeId, revision, monitoring }) 
           GF_ANALYTICS_REPORTING_ENABLED: 'false', GF_ANALYTICS_CHECK_FOR_UPDATES: 'false', GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false',
           GF_PLUGINS_PREINSTALL_DISABLED: 'true', GF_PLUGINS_PLUGIN_ADMIN_ENABLED: 'false', GF_SNAPSHOTS_EXTERNAL_ENABLED: 'false',
           GF_NEWS_NEWS_FEED_ENABLED: 'false', GF_UNIFIED_ALERTING_ENABLED: 'false', GF_LOG_MODE: 'console', GF_LOG_LEVEL: 'warn', GF_METRICS_ENABLED: 'true',
-          GF_USERS_DEFAULT_LANGUAGE: 'zh-Hans', GF_AUTH_DISABLE_LOGIN_FORM: 'false',
+          GF_USERS_DEFAULT_LANGUAGE: 'zh-Hans', GF_AUTH_DISABLE_LOGIN_FORM: 'true', GF_AUTH_BASIC_ENABLED: 'false', GF_LIVE_MAX_CONNECTIONS: '0',
         },
         volumes: ['grafanadata:/var/lib/grafana', { type: 'tmpfs', target: '/tmp', tmpfs: { size: 16777216 } }],
         configs: [config('datasources.json', '/etc/grafana/provisioning/datasources/bairui.yaml'), config('dashboards.json', '/etc/grafana/provisioning/dashboards/bairui.yaml'), config('dashboard.json', '/etc/bairui/dashboards/platform.json')],
-        secrets: [secret('grafana_password', 'grafana-password', '472')], healthcheck: health(3000, '/api/health'),
+        secrets: [secret('grafana_password', 'grafana-password', '472')], healthcheck: health(3000, '/api/admin/grafana/api/health'),
       },
       receiver: { ...service('bairui/platform-api-preprod:' + revision, '1000:1000', '128M', '0.20'),
         command: ['node', 'src/monitoring/alert-receiver-index.mjs'],

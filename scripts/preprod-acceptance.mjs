@@ -1,5 +1,14 @@
 import assert from 'node:assert/strict';
 
+export async function cleanupMonitoringIdentity({ signOut, revoke }) {
+  let success = true;
+  for (const cleanup of [signOut, revoke]) {
+    if (!cleanup) continue;
+    try { await cleanup(); } catch { success = false; }
+  }
+  return success;
+}
+
 export function viewerGrantCommand(containerId, userId) {
   assert.match(containerId, /^[a-f0-9]{12,64}$/);
   assert.match(userId, /^[a-zA-Z0-9_-]{1,200}$/);

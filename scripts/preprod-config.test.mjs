@@ -96,6 +96,16 @@ test('monitoring acceptance uses the Grafana emergency session instead of Basic 
   assert.throws(() => grafanaSessionCookie({}), /grafana_admin_session_missing/);
 });
 
+test('monitoring fixture role revocation is attempted even when HTTP logout fails', async () => {
+  const helpers = await import('./preprod-acceptance.mjs');
+  assert.equal(typeof helpers.cleanupMonitoringIdentity, 'function');
+  let revoked = 0;
+  const ok = await helpers.cleanupMonitoringIdentity({ signOut: async () => { throw new Error('unavailable'); }, revoke: async () => { revoked++; } });
+  assert.equal(ok, false); assert.equal(revoked, 1);
+  assert.equal(await helpers.cleanupMonitoringIdentity({ signOut: async () => {}, revoke: async () => {} }), true);
+  assert.equal(await helpers.cleanupMonitoringIdentity({ revoke: async () => { throw new Error('database unavailable'); } }), false);
+});
+
 test('bootstrap uses file secrets and a restricted role in the independent database', () => {
   const sql = bootstrapSql([{ name: '001.sql', sql: 'SELECT 1;' }], input.schemaHash);
   assert.ok(sql.includes('NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS'));
@@ -125,11 +135,11 @@ test('ownership and local single-node checks fail closed', () => {
   assert.throws(() => assertLocalDocker({ ...info, Swarm: { ...info.Swarm, Nodes: 2 } }, 'unix:///var/run/docker.sock'));
 });
 
-function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.caddyVolume], imagePrefix, imageLabels, missingImages = false, monitoring, absent = [], currentGatewayImage = false, recreatedProxyIp = '10.0.1.3' } = {}) {
+function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.caddyVolume], imagePrefix, imageLabels, missingImages = false, monitoring, publicOrigin, publishedPort = '8443', freshInstallation = false, absent = [], currentGatewayImage = false, recreatedProxyIp = '10.0.1.3' } = {}) {
   const installation = 'a'.repeat(24), labels = { 'bairui.preprod.installation': installation };
   const endpoint = 'npipe:////./pipe/dockerDesktopLinuxEngine';
   const state = { version: 1, installation, phase, secretsReady: true, nodeId: 'local-node', endpoint,
-    schemaHash: createHash('sha256').update('[]').digest('hex'), ...(monitoring ? { monitoring } : {}) };
+    schemaHash: createHash('sha256').update('[]').digest('hex'), ...(monitoring ? { monitoring } : {}), ...(publicOrigin ? { publicOrigin } : {}) };
   const existingVolumes = new Set(volumes), commands = [], mutations = [], writes = [];
   // The fixture supplies empty directories/files to the real revision calculation.
   const hash = createHash('sha256').update(gatewayConfig(state));
@@ -148,6 +158,7 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
     } });
     if (kind === 'ps') return '';
     if (action === 'inspect') {
+      if (freshInstallation) return missing(kind, name);
       if (absent.includes(name)) return missing(kind, name);
       if (kind === 'volume' && !existingVolumes.has(name)) return missing(kind, name);
       if (kind === 'image') {
@@ -155,6 +166,7 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
         return JSON.stringify({ Labels: labels, Config: { Labels: name.startsWith(imagePrefix ?? '!') ? imageLabels : labels } });
       }
       if (kind === 'container') return JSON.stringify({ Config: { Labels: labels, Image: gatewayImage },
+        HostConfig: { PortBindings: { '443/tcp': [{ HostIp: '127.0.0.1', HostPort: publishedPort }] } },
         State: { Running: recreated || phase !== 'stopped' }, NetworkSettings: { Networks: { [names.edge]: { IPAddress: recreated ? recreatedProxyIp : '10.0.1.3' },
           ...(monitorConnected ? { [monitorNames.network]: { IPAddress: '10.0.3.9' } } : {}) } } });
       if (kind === 'network') return JSON.stringify({ Labels: labels, Driver: 'overlay', Attachable: true, Internal: name === names.data || name === monitorNames.network });
@@ -178,7 +190,10 @@ function recoveryFixture(t, { phase = 'running', volumes = [names.volume, names.
     return { stdin: { on() {}, end() {} } };
   });
   t.mock.method(fs, 'readFile', async path => {
-    if (path === paths.state) return JSON.stringify(state);
+    if (path === paths.state) {
+      if (freshInstallation) throw Object.assign(new Error('missing state'), { code: 'ENOENT' });
+      return JSON.stringify(state);
+    }
     assert.ok(!String(path).includes('.env') && !String(path).includes('secrets'), 'unexpected_sensitive_file_read');
     return '';
   });
@@ -213,8 +228,48 @@ test('preprod up keeps monitoring attached and pauses API before gateway replace
   const connect = fixture.mutations.findIndex(args => args[0] === 'network' && args[1] === 'connect');
   assert.ok(pause >= 0 && pause < remove && remove < connect);
   const gateway = fixture.mutations.find(args => args[0] === 'run');
-  assert.ok(gateway.includes('127.0.0.1:9443:9443'));
+  assert.ok(!gateway.some(arg => arg.includes('9443')));
+  assert.ok(!gateway.some(arg => arg.includes('9494:9494')));
   assert.ok(!fixture.mutations.some(args => ['volume', 'secret'].includes(args[0])));
+});
+
+test('cloud up publishes only HTTPS 443 while preserving original volumes and Secrets', async t => {
+  const fixture = recoveryFixture(t, { publicOrigin: 'https://console.example.com' });
+  await assert.rejects(up(), /stack deploy/);
+  const gateway = fixture.mutations.find(args => args[0] === 'run');
+  assert.deepEqual(gateway.filter((_, i) => gateway[i - 1] === '-p'), ['0.0.0.0:443:443']);
+  const stack = JSON.parse(fixture.writes.find(w => w.path === paths.stack).data);
+  assert.equal(stack.services.api.environment.BETTER_AUTH_URL, 'https://console.example.com');
+  assert.ok(!fixture.mutations.some(args => ['volume', 'secret'].includes(args[0])));
+});
+
+test('changing only the HTTPS port recreates a running same-image gateway after pausing APIs', async t => {
+  const fixture = recoveryFixture(t, { publicOrigin: 'https://localhost:8444', currentGatewayImage: true });
+  await assert.rejects(up(), /stack deploy/);
+  const pause = fixture.mutations.findIndex(args => args[0] === 'service' && args[1] === 'scale' && args.includes(names.api + '=0'));
+  const remove = fixture.mutations.findIndex(args => args[0] === 'container' && args[1] === 'rm');
+  const run = fixture.mutations.findIndex(args => args[0] === 'run');
+  assert.ok(pause >= 0 && remove > pause && run > remove);
+  assert.ok(fixture.mutations[run].includes('127.0.0.1:8444:443'));
+  assert.ok(!fixture.mutations.some(args => ['volume', 'secret'].includes(args[0])));
+});
+
+test('invalid explicit cloud origin is rejected before deployment or state writes', async t => {
+  const fixture = recoveryFixture(t);
+  const previous = process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN;
+  process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN = 'https://console.example.com\n:9999';
+  t.after(() => { if (previous === undefined) delete process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN; else process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN = previous; });
+  await assert.rejects(up(), /invalid_monitoring_public_origin/);
+  assert.deepEqual(fixture.mutations, []); assert.deepEqual(fixture.writes, []);
+});
+
+test('fresh installation validates public origin before recording installation identity', async t => {
+  const fixture = recoveryFixture(t, { freshInstallation: true });
+  const previous = process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN;
+  process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN = 'http://console.example.com';
+  t.after(() => { if (previous === undefined) delete process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN; else process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN = previous; });
+  await assert.rejects(up(), /invalid_monitoring_public_origin/);
+  assert.deepEqual(fixture.mutations, []); assert.deepEqual(fixture.writes, []);
 });
 
 test('stopped same-image gateway is recreated with persistent data and a newly trusted proxy IP', async t => {

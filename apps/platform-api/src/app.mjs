@@ -82,6 +82,8 @@ export const MIN_PASSWORD_LENGTH = 8;
 
 export function createApp(options = {}) {
   const env = options.env ?? process.env;
+  if ((env.BAIRUI_MONITORING_SCOPE !== undefined && !['business', 'preprod'].includes(env.BAIRUI_MONITORING_SCOPE))
+    || (env.BAIRUI_GRAFANA_AUTH_MODE === 'session' && env.BAIRUI_MONITORING_SCOPE !== 'preprod')) throw new Error('invalid_monitoring_scope');
   const capabilities = platformCapabilities(env);
   const injectedTest = env.NODE_ENV === 'test' && (options.store || options.auth || options.authOptions?.betterAuthDatabase);
   if (!injectedTest) validatePlatformStartup(env);
@@ -159,7 +161,7 @@ export function createApp(options = {}) {
   const telemetry = createTelemetry(metricsConfig, store, { readinessTimeoutMs: options.metricsReadinessTimeoutMs });
   const adminMonitoring = options.adminMonitoring ?? createAdminMonitoring({ baseUrl: env.BAIRUI_PROMETHEUS_URL, token: env.BAIRUI_MONITORING_PROXY_TOKEN });
   const grafana = createGrafanaProxy({ baseUrl: env.BAIRUI_GRAFANA_UPSTREAM_URL, token: env.BAIRUI_MONITORING_PROXY_TOKEN,
-    publicOrigin: env.BAIRUI_GRAFANA_PUBLIC_ORIGIN });
+    publicOrigin: env.BAIRUI_GRAFANA_PUBLIC_ORIGIN, authMode: env.BAIRUI_GRAFANA_AUTH_MODE });
   let draining = false;
 
   const server = createServer(async (request, response) => {

@@ -6,7 +6,7 @@ import { readFile, writeFile, readdir, mkdir, open, unlink, rename } from 'node:
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { stackConfig, gatewayConfig, bootstrapSql, assertOwned, assertLocalDocker, names, label, origin, apiImage, webImage, bootstrapName, missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
+import { stackConfig, gatewayConfig, gatewayPublish, consolePublicOrigin, bootstrapSql, assertOwned, assertLocalDocker, names, label, apiImage, webImage, bootstrapName, missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
 import { monitorNames } from './monitoring-config.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
 
@@ -115,10 +115,11 @@ export async function containers(service, state) {
 }
 
 export async function request(path, { method = 'GET', headers = {}, body, ca, timeout = 12000 } = {}) {
-  ca ??= await readFile(paths.ca);
+  const publicOrigin = consolePublicOrigin((await loadState())?.publicOrigin);
+  if (['localhost', '127.0.0.1', '[::1]'].includes(new URL(publicOrigin).hostname)) ca ??= await readFile(paths.ca);
   return new Promise((resolveResult, reject) => {
-    const req = httpsRequest(new URL(path, origin), { method, family: 4, ca, rejectUnauthorized: true,
-      headers: { origin, ...headers }, timeout }, res => {
+    const req = httpsRequest(new URL(path, publicOrigin), { method, family: 4, ca, rejectUnauthorized: true,
+      headers: { origin: publicOrigin, ...headers }, timeout }, res => {
       let text = '';
       res.on('data', chunk => { text += chunk; if (text.length > 4 * 1024 * 1024) req.destroy(new Error('response_too_large')); });
       res.on('end', () => resolveResult({ status: res.statusCode, headers: res.headers, text }));
@@ -200,6 +201,7 @@ export async function up() {
   console.log('启动本机常驻预发；不读取 .env，不连接 bairui 业务库。');
   const local = await localDocker(), schema = await migrations();
   let state = await loadState();
+  const publicOrigin = consolePublicOrigin(process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN ?? state?.publicOrigin);
   if (!state) {
     state = { version: 1, installation: randomBytes(12).toString('hex'), nodeId: local.nodeId, endpoint: local.endpoint,
       schemaHash: schema.hash, createdAt: new Date().toISOString(), phase: 'initializing', secretsReady: false };
@@ -216,9 +218,15 @@ export async function up() {
   }
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).assertMonitoringResources(state);
   if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).assertRuntimeResources('preprod', state);
+  if (state.publicOrigin !== publicOrigin) { state.publicOrigin = publicOrigin; await saveState(state); }
   let gateway = await owned('container', names.gateway, state);
-  if (!gateway?.State.Running) await freePort();
-  if (state.monitoring?.enabled && (!gateway?.State.Running || !gateway.HostConfig?.PortBindings?.['9443/tcp'])) await freePort(9443);
+  const publication = gatewayPublish(publicOrigin);
+  const desiredPort = new URL(publicOrigin).port || '443';
+  const bindings = gateway?.HostConfig?.PortBindings ?? {};
+  const [desiredHostIp] = publication.split(':');
+  const publicationMatches = Object.keys(bindings).length === 1 && bindings['443/tcp']?.length === 1
+    && bindings['443/tcp'][0].HostIp === desiredHostIp && bindings['443/tcp'][0].HostPort === desiredPort;
+  if (!gateway?.State.Running || gateway.HostConfig?.PortBindings?.['443/tcp']?.[0]?.HostPort !== desiredPort) await freePort(Number(desiredPort));
   const rev = await revision(state);
   await writeFile(join(output, 'Caddyfile'), gatewayConfig(state));
   for (const [image, file, log] of [[apiImage(rev), 'apps/platform-api/Dockerfile', 'build-api.log'], [webImage(rev), 'infra/preprod/gateway.Dockerfile', 'build-web.log']]) {
@@ -238,7 +246,7 @@ export async function up() {
   }
   const configName = bootstrapName(schema.hash);
   if (!await owned('config', configName, state)) await docker(['config', 'create', '--label', label + '=' + state.installation, configName, '-'], { input: bootstrapSql(schema.files, schema.hash) });
-  if (!gateway || !gateway.State.Running || gateway.Config.Image !== webImage(rev)) {
+  if (!gateway || !gateway.State.Running || gateway.Config.Image !== webImage(rev) || !publicationMatches) {
     await pauseApi(state);
     // Recreate stopped gateways: Docker may have deactivated their local overlay
     // endpoint. Keep the certificate volume and resolve the new proxy IP below.
@@ -252,8 +260,7 @@ export async function up() {
       '--read-only', '--cap-drop', 'ALL', '--cap-add', 'NET_BIND_SERVICE', '--security-opt', 'no-new-privileges:true',
       '--tmpfs', '/config:rw,noexec,nosuid,size=8m', '--tmpfs', '/tmp:rw,noexec,nosuid,size=8m',
       '--log-driver', 'json-file', '--log-opt', 'max-size=10m', '--log-opt', 'max-file=3',
-      '--mount', 'type=volume,source=' + names.caddyVolume + ',target=/data', '-p', '127.0.0.1:8443:443',
-      ...(state.monitoring?.enabled ? ['-p', '127.0.0.1:9443:9443'] : []), webImage(rev)]);
+      '--mount', 'type=volume,source=' + names.caddyVolume + ',target=/data', '-p', publication, webImage(rev)]);
   }
   gateway = await owned('container', names.gateway, state);
   if (state.monitoring?.enabled && !gateway.NetworkSettings.Networks[monitorNames.network]) {
@@ -279,20 +286,21 @@ export async function up() {
     const rows = await containers(names.api, state);
     return rows.length === 2 && rows.every(c => c.State.Health?.Status === 'healthy' && c.Config.Image === apiImage(rev));
   }, '双 API 启动');
-  const cert = await waitUntil(async () => {
+  const localTls = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(publicOrigin).hostname);
+  const cert = localTls ? await waitUntil(async () => {
     try { return await docker(['exec', names.gateway, 'cat', '/data/caddy/pki/authorities/local/root.crt']); }
     catch { return false; }
-  }, '本地证书生成');
-  await writeFile(paths.ca, cert + '\n');
+  }, '本地证书生成') : null;
+  if (cert) await writeFile(paths.ca, cert + '\n');
   await waitReady();
   state.phase = 'running'; state.revision = rev; state.proxyIp = proxyIp;
-  state.certificateFingerprint = new X509Certificate(cert).fingerprint256;
+  if (cert) state.certificateFingerprint = new X509Certificate(cert).fingerprint256;
   state.updatedAt = new Date().toISOString();
   await saveState(state);
   if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).startRuntimeEnvironment('preprod');
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).deployMonitoring(state);
-  console.log('预发已就绪：' + origin + '，双 API / 独立 bairui_preprod。');
-  console.log('公开 CA 证书：' + paths.ca + '；未修改 Windows 信任。');
+  console.log('预发已就绪：' + publicOrigin + '/admin/，双 API / 独立 bairui_preprod；监控同端口访问。');
+  if (cert) console.log('公开 CA 证书：' + paths.ca + '；未修改系统信任。');
 }
 
 export async function status() {
@@ -301,7 +309,7 @@ export async function status() {
   const local = await localDocker();
   if (local.nodeId !== state.nodeId || local.endpoint !== state.endpoint) throw new Error('当前 Docker 不是记录的预发节点。');
   await checkResources(state);
-  console.log('环境：' + state.installation + ' | ' + origin + ' | 记录状态：' + state.phase);
+  console.log('环境：' + state.installation + ' | ' + consolePublicOrigin(state.publicOrigin) + ' | 记录状态：' + state.phase);
   for (const name of [names.api, names.db]) {
     const service = await owned('service', name, state), rows = await containers(name, state);
     console.log(name + '：运行 ' + rows.length + ' / 期望 ' + (service?.Spec.Mode.Replicated.Replicas ?? 0) + '，健康 ' + rows.filter(c => c.State.Health?.Status === 'healthy').length + '，更新 ' + (service?.UpdateStatus?.State ?? '无'));

@@ -12,6 +12,7 @@ import { runtimeLabel, runtimeNames } from './runtime-deployment-config.mjs';
 import { businessNames, businessLabel, businessKinds, businessVolumes, businessCredentials, businessImages, businessAssets,
   assertBusinessOwned, businessConnector, businessBridgeConfig, businessContainerArguments, businessValidationArguments, businessRevision } from './business-monitoring-config.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
+import { monitoringPublicOrigin } from '../apps/platform-api/src/admin/monitoring-origin.mjs';
 
 // Deliberately independent of the business .env, database credentials and preprod writes.
 export const businessOutput = join(root, 'output', 'business-monitoring');
@@ -104,7 +105,7 @@ export async function assertBusinessResources(state, overrides) {
     let value;
     try { value = await deps.readFile(join(deps.directory, name)); } catch { throw new Error('business_private_file_missing:' + name); }
     if (name === 'connector.json') {
-      try { assert.deepEqual(JSON.parse(value), businessConnector(state.installation, deps.directory)); }
+      try { assert.deepEqual(JSON.parse(value), businessConnector(state.installation, deps.directory, state.publicOrigin)); }
       catch { throw new Error('business_connector_invalid'); }
     }
   }
@@ -195,7 +196,7 @@ export async function writeAssets(state, runtimeTokenFiles, overrides) {
   const staged = await mkdtemp(join(deps.directory, '.assets-'));
   try {
     const changes = [];
-    for (const [name, asset] of Object.entries({ ...businessAssets(), 'caddy.json': businessBridgeConfig(token), 'connector.json': businessConnector(state.installation, deps.directory) })) {
+    for (const [name, asset] of Object.entries({ ...businessAssets(), 'caddy.json': businessBridgeConfig(token), 'connector.json': businessConnector(state.installation, deps.directory, state.publicOrigin) })) {
       const value = JSON.stringify(asset, null, 2) + '\n';
       assert.ok(Buffer.byteLength(value) <= 1024 * 1024, 'business_asset_too_large');
       await writeFile(join(staged, name), value, { mode: 0o600, flag: 'wx' });
@@ -238,11 +239,14 @@ export async function validateBusinessAssets(runtimeTokenFiles, directory = busi
 
 export async function businessUp() {
   const context = await machineContext(); let state = context.state;
+  const publicOrigin = monitoringPublicOrigin(process.env.BAIRUI_BUSINESS_PUBLIC_ORIGIN ?? state?.publicOrigin);
+  businessConnector(state?.installation ?? '0'.repeat(24), businessOutput, publicOrigin);
+  if (state && publicOrigin !== monitoringPublicOrigin(state.publicOrigin)) throw new Error('business_public_origin_change_requires_explicit_migration');
   if (!state) {
     const entries = await readdir(businessOutput);
     assert.ok(entries.every(name => name === 'operation.lock'), 'business_unrecorded_private_files');
     state = { version: 1, installation: randomBytes(12).toString('hex'), phase: 'initializing', endpoint: context.local.endpoint, nodeId: context.local.nodeId,
-      createdAt: new Date().toISOString(), credentialsReady: false, assetsReady: false, resourcesReady: false };
+      createdAt: new Date().toISOString(), credentialsReady: false, assetsReady: false, resourcesReady: false, publicOrigin };
     await saveBusinessState(state);
     for (const name of businessCredentials) await writeFile(join(businessOutput, name), randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' });
     state.credentialsReady = true; await saveBusinessState(state);
@@ -251,7 +255,7 @@ export async function businessUp() {
   assert.equal(state.credentialsReady, true, 'business_credentials_incomplete');
   await assertBusinessResources(state);
   await ensureImages(); await writeAssets(state, context.runtimeTokenFiles); await ensureBusinessResources(state);
-  const input = { revision: businessRevision(), runtimeTokenFiles: context.runtimeTokenFiles, assetsChanged: state.assetsPendingReconcile === true };
+  const input = { revision: businessRevision(state.publicOrigin), publicOrigin: state.publicOrigin, runtimeTokenFiles: context.runtimeTokenFiles, assetsChanged: state.assetsPendingReconcile === true };
   await reconcileBusinessContainer('prometheus', state, input);
   let prometheus = await businessOwned('container', businessNames.prometheus, state, defaults);
   if (!prometheus.NetworkSettings.Networks[monitorNames.network]) await docker(['network', 'connect', monitorNames.network, prometheus.Id]);
@@ -268,7 +272,7 @@ export async function businessUp() {
   }, '业务监控三个组件启动', 180000);
   state.phase = 'running'; state.revision = input.revision; state.gatewayIp = input.gatewayIp;
   delete state.assetsPendingReconcile; await saveBusinessState(state);
-  console.log('业务监控已就绪；同源管理入口：http://localhost:5173/admin/。机器连接配置：' + businessPaths.connector);
+  console.log('业务监控已就绪；同源管理入口：' + publicOrigin + '/admin/。机器连接配置：' + businessPaths.connector);
   console.log('专用 bridge 允许出站以采集宿主 API；仅 Prometheus 接入现有监控 overlay，原预发服务和数据保持原配置。');
   return state;
 }

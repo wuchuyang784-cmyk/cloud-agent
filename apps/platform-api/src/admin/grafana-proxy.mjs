@@ -1,4 +1,5 @@
 import { grafanaExpressions } from './grafana-dashboard.mjs';
+import { monitoringPublicOrigin } from './monitoring-origin.mjs';
 
 export const grafanaPrefix = '/api/admin/grafana/';
 export const grafanaDashboardUrl = grafanaPrefix + 'd/bairui-platform/bairui-platform?kiosk';
@@ -26,14 +27,15 @@ function fixedQuery(body) {
   }) };
 }
 
-export function createGrafanaProxy({ baseUrl = '', token = '', publicOrigin = '', fetchImpl = fetch, timeoutMs = 20000,
+export function createGrafanaProxy({ baseUrl = '', token = '', publicOrigin = '', authMode = 'bearer', fetchImpl = fetch, timeoutMs = 20000,
   maxConcurrent = 32, maxBytes = 32 * 1024 * 1024 } = {}) {
   let origin = null, browserOrigin = null;
-  if (baseUrl || token || publicOrigin) {
+  if (!['bearer', 'session'].includes(authMode)) throw new Error('invalid_grafana_configuration');
+  if (baseUrl || token || publicOrigin || authMode === 'session') {
     try {
-      const url = new URL(baseUrl), browser = new URL(publicOrigin);
+      const url = new URL(baseUrl), browser = new URL(monitoringPublicOrigin(publicOrigin));
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== '/'
-        || !['http:', 'https:'].includes(browser.protocol) || browser.origin !== publicOrigin || !/^[a-f0-9]{64}$/.test(token)) throw new Error();
+        || (authMode === 'session' ? baseUrl !== 'http://bairui-preprod-gateway:9494' || Boolean(token) : !/^[a-f0-9]{64}$/.test(token))) throw new Error();
       origin = url.origin; browserOrigin = browser.origin;
     } catch { throw new Error('invalid_grafana_configuration'); }
   }
@@ -86,8 +88,10 @@ export function createGrafanaProxy({ baseUrl = '', token = '', publicOrigin = ''
           finally { readingBody = false; }
         }
         const upstream = await fetchImpl(origin + grafanaPrefix + path + url.search, {
-          method: request.method, headers: { authorization: 'Bearer ' + token, 'x-bairui-monitor-user': 'bairui:' + principal.userId,
-            'x-bairui-monitor-role': 'Viewer', ...(body ? { 'content-type': 'application/json' } : {}), accept: request.headers.accept ?? '*/*' },
+          method: request.method, headers: { ...(authMode === 'session'
+            ? (request.headers.cookie ? { cookie: request.headers.cookie } : {})
+            : { authorization: 'Bearer ' + token, 'x-bairui-monitor-user': 'bairui:' + principal.userId, 'x-bairui-monitor-role': 'Viewer' }),
+            ...(body ? { 'content-type': 'application/json' } : {}), accept: request.headers.accept ?? '*/*' },
           ...(body ? { body } : {}), redirect: 'manual', signal: controller.signal,
         });
         if (upstream.status >= 300 && upstream.status < 400) {

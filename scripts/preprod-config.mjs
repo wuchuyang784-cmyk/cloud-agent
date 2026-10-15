@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { isIP } from 'node:net';
 import { monitorNames } from './monitoring-config.mjs';
+import { monitoringPublicOrigin } from '../apps/platform-api/src/admin/monitoring-origin.mjs';
 
 export const label = 'bairui.preprod.installation';
 export const origin = 'https://localhost:8443';
@@ -13,6 +14,18 @@ export const names = Object.freeze({
 export const apiImage = revision => 'bairui/platform-api-preprod:' + revision;
 export const webImage = revision => 'bairui/platform-web-preprod:' + revision;
 export const bootstrapName = hash => 'bairui-preprod-bootstrap-' + hash.slice(0, 16);
+
+export function consolePublicOrigin(value = origin) {
+  const validated = monitoringPublicOrigin(value);
+  assert.equal(new URL(validated).protocol, 'https:', 'console_https_required');
+  return validated;
+}
+
+export function gatewayPublish(value = origin) {
+  const url = new URL(consolePublicOrigin(value));
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  return (loopback ? '127.0.0.1' : '0.0.0.0') + ':' + (url.port || '443') + ':443';
+}
 
 export function dockerEndpoint(env, contextEndpoint) {
   return env.DOCKER_CONTEXT ? contextEndpoint : env.DOCKER_HOST || contextEndpoint;
@@ -36,7 +49,8 @@ export function assertLocalDocker(info, endpoint) {
   assert.equal(info.Swarm?.Nodes, 1, 'single_node_only');
 }
 
-export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHash, monitoring }) {
+export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHash, monitoring, publicOrigin }) {
+  const consoleOrigin = consolePublicOrigin(publicOrigin);
   assert.match(installation, /^[a-f0-9]{24}$/);
   assert.match(nodeId, /^[a-z0-9-]+$/);
   assert.match(revision, /^[a-f0-9]{16}$/);
@@ -53,11 +67,13 @@ export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHas
         labels, logging, networks: ['edge', 'data', ...(monitoring?.enabled ? ['monitor'] : [])], stop_grace_period: '20s',
         environment: {
           NODE_ENV: 'production', PORT: '8080', BAIRUI_PLATFORM_MODE: 'platform', BAIRUI_AUTH_MODE: 'better-auth',
-          BAIRUI_SECRET_FILE: '/run/secrets/platform-env', BETTER_AUTH_URL: origin,
+          BAIRUI_SECRET_FILE: '/run/secrets/platform-env', BETTER_AUTH_URL: consoleOrigin,
           BAIRUI_TRUSTED_PROXIES: proxyIp + '/32', BAIRUI_SIMULATION_ENABLED: '0',
           BAIRUI_DB_POOL_MAX: '10', BAIRUI_DB_CONNECT_TIMEOUT_MS: '2000', BAIRUI_DB_QUERY_TIMEOUT_MS: '5000',
           ...(monitoring?.enabled ? { BAIRUI_METRICS_ENABLED: '1', BAIRUI_METRICS_PORT: '9464', BAIRUI_METRICS_TOKEN_FILE: '/run/secrets/metrics-token',
-            BAIRUI_PROMETHEUS_URL: 'http://' + monitorNames.prometheus + ':9090' } : {}),
+            BAIRUI_PROMETHEUS_URL: 'http://' + monitorNames.prometheus + ':9090',
+            BAIRUI_GRAFANA_UPSTREAM_URL: 'http://' + names.gateway + ':9494', BAIRUI_GRAFANA_AUTH_MODE: 'session',
+            BAIRUI_GRAFANA_PUBLIC_ORIGIN: consoleOrigin, BAIRUI_MONITORING_SCOPE: 'preprod' } : {}),
         },
         secrets: [{ source: 'platform_env', target: 'platform-env', uid: '1000', gid: '1000', mode: 256 },
           ...(monitoring?.enabled ? [{ source: 'metrics_token', target: 'metrics-token', uid: '1000', gid: '1000', mode: 256 }] : [])],
@@ -103,7 +119,9 @@ export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHas
   };
 }
 
-export function gatewayConfig({ monitoring } = {}) {
+export function gatewayConfig({ monitoring, publicOrigin } = {}) {
+  const consoleUrl = new URL(consolePublicOrigin(publicOrigin));
+  const localTls = ['localhost', '127.0.0.1', '[::1]'].includes(consoleUrl.hostname);
   return `{
   admin off
   auto_https disable_redirects
@@ -117,8 +135,8 @@ export function gatewayConfig({ monitoring } = {}) {
     }
   }
 }
-https://localhost {
-  tls internal
+https://${consoleUrl.hostname} {
+${localTls ? '  tls internal\n' : ''}
   encode gzip
   header {
     X-Content-Type-Options nosniff
@@ -171,58 +189,18 @@ https://localhost {
     }
   }
 }
-${monitoring?.enabled ? `https://localhost:9443 {
-  tls internal
-  @private path /metrics /metrics/*
-  handle @private {
-    respond 404
-  }
+${monitoring?.enabled ? `http://:9494 {
   header {
     X-Content-Type-Options nosniff
     Referrer-Policy same-origin
-    Content-Security-Policy "frame-ancestors https://localhost:8443"
+    Content-Security-Policy "frame-ancestors 'self'"
     -Server
   }
   request_header -X-Bairui-Monitor-User
   request_header -X-Bairui-Monitor-Role
-  @emergencyLogin path /login /login/* /logout
-  handle @emergencyLogin {
-    reverse_proxy {
-      dynamic a {
-        name tasks.${monitorNames.grafana}
-        port 3000
-        refresh 2s
-      }
-      header_up -X-Bairui-Monitor-User
-    }
-  }
-  @emergencyPublic path /public/* /robots.txt /favicon.ico
-  handle @emergencyPublic {
-    reverse_proxy {
-      dynamic a {
-        name tasks.${monitorNames.grafana}
-        port 3000
-        refresh 2s
-      }
-      header_up -X-Bairui-Monitor-User
-      header_up -X-Bairui-Monitor-Role
-      header_up -Cookie
-      header_up -Authorization
-      header_down -Set-Cookie
-    }
-  }
-  @emergencySession header_regexp grafanaSession Cookie "(?i)(^|;\\s*)grafana_session="
-  handle @emergencySession {
-    reverse_proxy {
-      dynamic a {
-        name tasks.${monitorNames.grafana}
-        port 3000
-        refresh 2s
-      }
-      header_up -X-Bairui-Monitor-User
-    }
-  }
-  handle {
+  request_header -Authorization
+  @grafana path /api/admin/grafana/*
+  handle @grafana {
     forward_auth {
       uri /api/admin/monitoring/access
       copy_headers X-Bairui-Monitor-User X-Bairui-Monitor-Role
@@ -246,6 +224,9 @@ ${monitoring?.enabled ? `https://localhost:9443 {
         response_header_timeout 20s
       }
     }
+  }
+  handle {
+    respond 404
   }
 }` : ''}
 `;

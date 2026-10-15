@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { monitoringStack, monitoringAssets, monitorNames, monitorImages, monitorOrigin } from './monitoring-config.mjs';
+import { monitoringStack, monitoringAssets, monitorNames, monitorImages } from './monitoring-config.mjs';
 import { stackConfig, gatewayConfig } from './preprod-config.mjs';
 import { monitoringRevision } from './monitoring-config.mjs';
 
@@ -44,7 +44,10 @@ test('monitoring uses pinned bounded private services without host or database p
   assert.equal(stack.services.grafana.environment.GF_AUTH_ANONYMOUS_ENABLED, 'false');
   assert.equal(stack.services.grafana.environment.GF_USERS_ALLOW_SIGN_UP, 'false');
   assert.equal(stack.services.grafana.environment.GF_SECURITY_COOKIE_SECURE, 'true');
-  assert.equal(stack.services.grafana.environment.GF_SERVER_ROOT_URL, monitorOrigin);
+  assert.equal(stack.services.grafana.environment.GF_SERVER_ROOT_URL, 'https://localhost:8443/api/admin/grafana/');
+  assert.equal(stack.services.grafana.environment.GF_SERVER_SERVE_FROM_SUB_PATH, 'true');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_DISABLE_LOGIN_FORM, 'true');
+  assert.equal(stack.services.grafana.environment.GF_AUTH_BASIC_ENABLED, 'false');
   assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_ENABLED, 'true');
   assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_HEADER_NAME, 'X-Bairui-Monitor-User');
   assert.equal(stack.services.grafana.environment.GF_AUTH_PROXY_HEADER_PROPERTY, 'username');
@@ -87,6 +90,8 @@ test('Prometheus discovers each API task and includes missing-data and notificat
   assert.ok(hook.url.startsWith('http://bairui-monitor_receiver:9095/'));
   assert.ok(files['dashboard.json'].panels.length >= 8);
   assert.equal(files['datasources.json'].datasources[0].url, 'http://bairui-monitor_prometheus:9090');
+  assert.equal(files['dashboards.json'].providers[0].folderUid, 'bairui-platform-folder');
+  assert.notEqual(files['dashboards.json'].providers[0].folder, 'BaiRui', 'preserve the previous randomly identified folder rather than collide with it');
 });
 
 test('existing preprod opt-in joins monitoring with metrics secret without expanding proxy trust', () => {
@@ -95,6 +100,10 @@ test('existing preprod opt-in joins monitoring with metrics secret without expan
   assert.equal(stack.services.api.environment.BAIRUI_METRICS_ENABLED, '1');
   assert.equal(stack.services.api.environment.BAIRUI_METRICS_PORT, '9464');
   assert.equal(stack.services.api.environment.BAIRUI_PROMETHEUS_URL, 'http://bairui-monitor_prometheus:9090');
+  assert.equal(stack.services.api.environment.BAIRUI_GRAFANA_UPSTREAM_URL, 'http://bairui-preprod-gateway:9494');
+  assert.equal(stack.services.api.environment.BAIRUI_GRAFANA_PUBLIC_ORIGIN, 'https://localhost:8443');
+  assert.equal(stack.services.api.environment.BAIRUI_GRAFANA_AUTH_MODE, 'session');
+  assert.equal(stack.services.api.environment.BAIRUI_MONITORING_SCOPE, 'preprod');
   assert.equal(stack.services.api.environment.BAIRUI_TRUSTED_PROXIES, '10.0.1.3/32');
   assert.ok(stack.services.api.networks.includes('monitor'));
   assert.equal(stack.networks.monitor.external.name, monitorNames.network);
@@ -103,11 +112,12 @@ test('existing preprod opt-in joins monitoring with metrics secret without expan
   assert.equal(stack.services.api.ports, undefined);
 });
 
-test('Caddy isolates Grafana and does not expose any metrics or collection endpoint', () => {
+test('Caddy exposes only the platform entry and keeps the Grafana session bridge internal', () => {
   const original = gatewayConfig();
   assert.ok(!original.includes(':9443'));
   const enabled = gatewayConfig({ monitoring: { enabled: true } });
-  assert.ok(enabled.includes('https://localhost:9443'));
+  assert.ok(!enabled.includes('9443'));
+  assert.ok(enabled.includes('http://:9494'));
   assert.ok(enabled.includes('name tasks.' + monitorNames.grafana));
   assert.ok(enabled.includes('port 3000'));
   assert.ok(!enabled.includes('reverse_proxy ' + monitorNames.grafana + ':3000'));
@@ -115,15 +125,33 @@ test('Caddy isolates Grafana and does not expose any metrics or collection endpo
   assert.ok(enabled.includes('/api/admin/monitoring/access'));
   assert.ok(enabled.includes('request_header -X-Bairui-Monitor-Role'));
   assert.ok(enabled.includes('copy_headers X-Bairui-Monitor-User X-Bairui-Monitor-Role'));
-  assert.ok(enabled.includes('@emergencyPublic path /public/*'));
+  assert.ok(!enabled.includes('@emergency'));
+  assert.ok(!enabled.includes('grafana_session='));
+  assert.ok(enabled.includes('@grafana path /api/admin/grafana/*'));
   assert.ok(enabled.includes('header_up -Cookie'));
   assert.ok(enabled.includes('header_down -Set-Cookie'));
-  assert.ok(enabled.includes('frame-ancestors https://localhost:8443'));
+  assert.ok(enabled.includes("frame-ancestors 'self'"));
   assert.ok(enabled.includes('handle @private {\n    respond 404\n  }'));
   assert.ok(enabled.indexOf('handle @private') < enabled.indexOf('handle @api'), 'deny_route_precedes_spa_fallback');
   assert.ok(!enabled.includes('reverse_proxy bairui-monitor_prometheus'));
   assert.ok(!enabled.includes('reverse_proxy bairui-monitor_alertmanager'));
   assert.ok(!enabled.includes('reverse_proxy bairui-monitor_receiver'));
+});
+
+test('cloud origin is shared by auth, Grafana subpath and the only public gateway site', () => {
+  const publicOrigin = 'https://console.example.com';
+  const settings = { ...monitorInput, publicOrigin };
+  assert.equal(stackConfig(settings).services.api.environment.BETTER_AUTH_URL, publicOrigin);
+  assert.equal(stackConfig(settings).services.api.environment.BAIRUI_GRAFANA_PUBLIC_ORIGIN, publicOrigin);
+  assert.equal(monitoringStack(settings).services.grafana.environment.GF_SERVER_ROOT_URL, publicOrigin + '/api/admin/grafana/');
+  const config = gatewayConfig(settings);
+  assert.ok(config.includes(publicOrigin + ' {'));
+  assert.ok(!config.includes('localhost'));
+  assert.ok(!config.includes('tls internal'), 'public domain uses normal TLS certificates');
+  assert.ok(!config.includes(':9443'));
+  for (const invalid of ['http://console.example.com', 'https://a@console.example.com', 'https://console.example.com/path', 'https://console.example.com\n:9999']) {
+    assert.throws(() => gatewayConfig({ ...settings, publicOrigin: invalid }));
+  }
 });
 
 test('monitoring config identifiers cannot inject compose or Docker targets', () => {

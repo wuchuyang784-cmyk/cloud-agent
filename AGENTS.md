@@ -21,6 +21,14 @@
 
 ## 项目定位
 
+### 管理端同源监控（2026-10-15，代码开发；未部署）
+
+- 本批以 `docs/51-single-origin-admin-monitoring.md` 为准：业务与预发均从 `/admin/` 内嵌固定 `/api/admin/grafana/` 子路径；删除独立打开按钮和 9443 回退，预发不再发布独立 Grafana 端口或应急登录入口。下方历史部署记录保留，不代表当前环境已更新。
+- API 保持逐次平台会话、active 状态和只读权限校验，固定路径/PromQL/并发/正文限制。业务保留机器 Bearer 桥接；预发只向固定未发布的内部 9494 转发 Cookie，再由 Caddy forward_auth 复核并注入 Viewer，Cookie/Authorization 不传给 Grafana。
+- 云端显式 `BAIRUI_CONSOLE_PUBLIC_ORIGIN` 支持管理端统一 HTTPS 443；本机默认仍为 8443。独立业务 v2 connector 只接受非回环 HTTPS origin，v1 仍仅开发；已有业务 origin 变更需协调迁移，不静默改写。
+- 保留原卷、Secret、账号、安装身份及精确信任；本批不迁移数据库、不启用 Agent、不自动部署，不启动用户已要求停止的常驻本机服务。
+- 本机验收：后端 338 通过/9 数据库专项跳过，管理端/客户端各 19、配置组合 167 通过，管理端构建通过。临时 Linux/Caddy/Grafana/Prometheus 与 12 面板浏览器验证 7 组通过，报告 `output/monitoring-single-origin/2026-10-15T14-10-58-034Z/report.json`；认证为 fixture，不代表云端真实 Better Auth/业务库或旧持久卷升级验收。独立规格和质量复核通过，临时资源已清理，原常驻环境保持停止。
+
 ### F1：固定源码 pi Runtime（2026-10-13，1.1.0 独立复验通过，未部署）
 
 - 本批位于 `apps/platform-api/src/runtime/pi/production/`，独立固定配置/HMAC 请求、单任务有界 NDJSON、持久会话与任务 UUID 占位；旧 pi adapter/wrapper 保留，仅供 legacy 回归。不改 API/dev 启动链、E2 probe、平台能力开关或既有部署。

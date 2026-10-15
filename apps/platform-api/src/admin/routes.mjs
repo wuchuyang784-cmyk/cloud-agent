@@ -43,8 +43,8 @@ export async function handleAdmin({ request, response, url, principal, store, en
       if (!access.permissions?.includes(alerts ? 'alerts:read' : 'monitoring:read')) return fail(403, 'platform_role_required');
       if (!monitoring?.enabled) return fail(503, 'monitoring_unavailable');
       try { return sendJson(response, 200, alerts ? await monitoring.alerts({ severity, state }) : { ...await monitoring.overview(),
-        dashboardUrl: grafana?.enabled ? grafana.dashboardUrl : 'https://localhost:9443/d/bairui-platform/bairui-platform?kiosk',
-        scope: grafana?.enabled ? 'business' : 'preprod' }); }
+        dashboardUrl: grafana?.enabled ? grafana.dashboardUrl : null,
+        scope: env.BAIRUI_MONITORING_SCOPE === 'preprod' ? 'preprod' : 'business' }); }
       catch { return fail(503, 'monitoring_unavailable'); }
     }
     const governance = url.pathname.match(/^\/api\/admin\/users\/([a-zA-Z0-9_-]{1,200})\/governance$/);

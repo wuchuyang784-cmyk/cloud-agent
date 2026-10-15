@@ -107,6 +107,23 @@ test('connector is a fixed absolute-path machine contract without inline secrets
   assert.equal(connector.publicOrigin, 'http://localhost:5173');
 });
 
+test('cloud business connector and Grafana agree on one HTTPS console origin', () => {
+  const publicOrigin = 'https://console.example.com';
+  const connector = module.businessConnector(input.installation, input.directory, publicOrigin);
+  assert.equal(connector.version, 2);
+  assert.equal(connector.publicOrigin, publicOrigin);
+  const env = module.businessGrafanaEnvironment(input.gatewayIp, publicOrigin);
+  assert.equal(env.GF_SERVER_ROOT_URL, publicOrigin + '/api/admin/grafana/');
+  assert.equal(env.GF_SECURITY_COOKIE_SECURE, 'true');
+  assert.equal(env.GF_AUTH_BASIC_ENABLED, 'false');
+  const args = module.businessContainerArguments('grafana', { ...input, publicOrigin });
+  assert.ok(args.includes('GF_SERVER_ROOT_URL=' + publicOrigin + '/api/admin/grafana/'));
+  assert.notEqual(module.businessRevision(publicOrigin), module.businessRevision());
+  for (const bad of ['http://console.example.com', 'https://console.example.com/path', 'https://x@console.example.com', 'https://localhost:8443']) {
+    assert.throws(() => module.businessConnector(input.installation, input.directory, bad));
+  }
+});
+
 test('Grafana scrape follows its configured subpath without redirects', () => {
   assert.equal(module.businessAssets()['prometheus.json'].scrape_configs.find(j => j.job_name === 'grafana').metrics_path, '/api/admin/grafana/metrics');
 });

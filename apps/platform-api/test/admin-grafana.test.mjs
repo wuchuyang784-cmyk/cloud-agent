@@ -5,8 +5,9 @@ import { createApp } from '../src/app.mjs';
 import { MemoryStore } from '../src/store.mjs';
 import { createGrafanaProxy } from '../src/admin/grafana-proxy.mjs';
 import { createAdminMonitoring } from '../src/admin/monitoring.mjs';
+import { businessDashboard } from '../src/admin/grafana-dashboard.mjs';
 
-async function fixture(t, upstreamHandler) {
+async function fixture(t, upstreamHandler, { session = false, scope } = {}) {
   const seen = [];
   const upstream = createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk;
@@ -16,6 +17,8 @@ async function fixture(t, upstreamHandler) {
     res.end(JSON.stringify({ ok: true }));
   });
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const realFetch = globalThis.fetch;
+  if (session) t.mock.method(globalThis, 'fetch', (url, init) => realFetch(String(url).replace('http://bairui-preprod-gateway:9494', 'http://127.0.0.1:' + upstream.address().port), init));
   t.after(() => new Promise(resolve => { upstream.close(resolve); upstream.closeAllConnections(); }));
   const store = new MemoryStore({ seed: { users: [
     { id: 'viewer', email: 'viewer@example.test', organizationId: 'org-a', role: 'user' },
@@ -27,14 +30,71 @@ async function fixture(t, upstreamHandler) {
     const user = !signedOut && store.findUser(req.headers['x-test-user']);
     return user && { userId: user.id, organizationId: user.organizationId, email: user.email };
   } }, env: { NODE_ENV: 'test', BAIRUI_AUTH_MODE: 'better-auth',
-    BAIRUI_GRAFANA_UPSTREAM_URL: 'http://127.0.0.1:' + upstream.address().port,
-    BAIRUI_MONITORING_PROXY_TOKEN: 'b'.repeat(64), BAIRUI_GRAFANA_PUBLIC_ORIGIN: 'http://localhost:5173' } });
+    BAIRUI_GRAFANA_UPSTREAM_URL: session ? 'http://bairui-preprod-gateway:9494' : 'http://127.0.0.1:' + upstream.address().port,
+    ...(session ? { BAIRUI_GRAFANA_AUTH_MODE: 'session' } : { BAIRUI_MONITORING_PROXY_TOKEN: 'b'.repeat(64) }),
+    ...(scope ? { BAIRUI_MONITORING_SCOPE: scope } : {}), BAIRUI_GRAFANA_PUBLIC_ORIGIN: 'http://localhost:5173' } });
   await new Promise(resolve => app.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { app.close(resolve); app.closeAllConnections(); }));
-  return { seen, store, signOut: () => { signedOut = true; }, request: (path, user = 'viewer', init = {}) => fetch(
+  return { seen, store, signOut: () => { signedOut = true; }, request: (path, user = 'viewer', init = {}) => realFetch(
     'http://127.0.0.1:' + app.address().port + '/api/admin/grafana/' + path,
     { ...init, headers: { ...(user ? { 'x-test-user': user } : {}), ...init.headers }, redirect: 'manual' }) };
 }
+
+test('session proxy forwards only the original cookie and rechecks active platform access', async t => {
+  const { request, seen, store, signOut } = await fixture(t, null, { session: true, scope: 'preprod' });
+  assert.equal((await request('api/health', null)).status, 401);
+  assert.equal((await request('api/health', 'ordinary')).status, 403);
+  assert.equal((await request('api/health', 'viewer', { headers: { cookie: 'better-auth.session_token=original', authorization: 'Bearer attacker',
+    'x-bairui-monitor-user': 'admin', 'x-bairui-monitor-role': 'Admin', 'x-forwarded-for': 'attacker', 'x-forwarded-host': 'attacker',
+    'x-forwarded-proto': 'http', forwarded: 'for=attacker', 'x-remote-user': 'admin' } })).status, 200);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].headers.cookie, 'better-auth.session_token=original');
+  for (const key of ['authorization', 'x-bairui-monitor-user', 'x-bairui-monitor-role', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'forwarded', 'x-remote-user']) assert.equal(seen[0].headers[key], undefined, key);
+  store.accountGovernance = new Map([['viewer', { status: 'suspended', version: 1 }]]);
+  assert.equal((await request('api/health')).status, 403);
+  store.accountGovernance.clear(); signOut();
+  assert.equal((await request('api/health')).status, 401);
+  assert.equal(seen.length, 1);
+});
+
+test('session mode accepts only the exact private gateway and no bearer configuration', () => {
+  const config = { authMode: 'session', baseUrl: 'http://bairui-preprod-gateway:9494', publicOrigin: 'https://cloud.example.test' };
+  assert.equal(createGrafanaProxy(config).enabled, true);
+  for (const baseUrl of ['http://127.0.0.1:9494', 'https://bairui-preprod-gateway:9494', 'http://bairui-preprod-gateway:9494/', 'http://bairui-preprod-gateway:9494/path', 'http://bairui-preprod-gateway:9494?x=1', 'http://attacker:9494']) assert.throws(() => createGrafanaProxy({ ...config, baseUrl }), /invalid_grafana_configuration/, baseUrl);
+  for (const change of [{ token: 'a'.repeat(64) }, { authMode: 'unknown' }, { baseUrl: '' }, { publicOrigin: '' }, { publicOrigin: 'http://cloud.example.test' }]) assert.throws(() => createGrafanaProxy({ ...config, ...change }), /invalid_grafana_configuration/);
+});
+
+test('business dashboard describes the actual host without assuming its operating system', () => {
+  const dashboard = businessDashboard();
+  assert.doesNotMatch(JSON.stringify(dashboard), /Windows/);
+  assert.match(dashboard.panels[12].title, /宿主机.*实际/);
+});
+
+test('session proxy retains fixed path, PromQL, origin, redirect and response limits', async t => {
+  const { request, seen } = await fixture(t, null, { session: true, scope: 'preprod' });
+  assert.equal((await request('api/admin/settings')).status, 404);
+  assert.equal((await request('api/datasources/proxy/1?query=up')).status, 404);
+  assert.equal((await request('api/health', 'viewer', { headers: { origin: 'https://attacker.example' } })).status, 403);
+  const post = { method: 'POST', headers: { origin: 'http://localhost:5173', 'content-type': 'application/json', cookie: 'better-auth.session_token=original' } };
+  const body = { from: String(Date.now() - 60000), to: String(Date.now()), queries: [{ refId: 'A', expr: 'up', datasource: { uid: 'bairui-prometheus', type: 'prometheus' } }] };
+  assert.equal((await request('api/ds/query', 'viewer', { ...post, body: JSON.stringify(body) })).status, 422);
+  body.queries[0].expr = 'sum(up{job="bairui-api"}) or vector(0)';
+  assert.equal((await request('api/ds/query', 'viewer', { ...post, body: JSON.stringify(body) })).status, 200);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].headers.cookie, post.headers.cookie);
+  assert.equal(seen[0].headers.authorization, undefined);
+  assert.equal((await request('api/health')).status, 200);
+  assert.equal(seen[1].headers.cookie, undefined, 'a missing cookie is never synthesized');
+  const config = { authMode: 'session', baseUrl: 'http://bairui-preprod-gateway:9494', publicOrigin: 'http://localhost:5173', maxBytes: 1024 };
+  const statuses = [];
+  const input = { request: { url: '/api/admin/grafana/api/health', method: 'GET', headers: {} }, response: { destroyed: false },
+    url: new URL('http://platform/api/admin/grafana/api/health'), principal: { userId: 'viewer' }, fail: status => statuses.push(status) };
+  for (const response of [new Response('oversize'.repeat(1024)), new Response('', { status: 302, headers: { location: 'https://attacker.example' } }),
+    new Response('', { status: 401 }), new Response('', { status: 403 })]) {
+    await createGrafanaProxy({ ...config, fetchImpl: async () => response }).handle(input);
+  }
+  assert.deepEqual(statuses, [503, 503, 503, 503]);
+});
 
 test('Grafana same-origin gateway checks platform access on every request and replaces untrusted headers', async t => {
   const { request, seen, store, signOut } = await fixture(t);

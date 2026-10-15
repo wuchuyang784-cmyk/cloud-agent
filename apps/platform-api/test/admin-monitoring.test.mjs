@@ -9,14 +9,14 @@ const seed = { users: [
   { id: 'ordinary', email: 'ordinary@example.test', organizationId: 'org-b', role: 'user' },
 ] };
 
-async function fixture(t, adminMonitoring) {
+async function fixture(t, adminMonitoring, grafanaEnv = {}) {
   const store = new MemoryStore({ seed });
   store.platformRoles = new Map([['admin-a', { role: 'platform_viewer', revokedAt: null }]]);
   const auth = { provider: 'better-auth', async resolve(req) {
     const user = store.findUser(req.headers['x-test-user']);
     return user && { userId: user.id, organizationId: user.organizationId, email: user.email };
   } };
-  const app = createApp({ store, auth, adminMonitoring, env: { NODE_ENV: 'test', BAIRUI_AUTH_MODE: 'better-auth' } });
+  const app = createApp({ store, auth, adminMonitoring, env: { NODE_ENV: 'test', BAIRUI_AUTH_MODE: 'better-auth', ...grafanaEnv } });
   await new Promise(resolve => app.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => app.close(resolve)));
   return { store, request: (path, user = 'admin-a', init = {}) => fetch('http://127.0.0.1:' + app.address().port + path,
@@ -32,13 +32,37 @@ test('admin monitoring: fixed overview and bounded alert projections are authori
   const overview = await request('/api/admin/monitoring/overview');
   assert.equal(overview.status, 200);
   assert.equal(overview.headers.get('cache-control'), 'no-store');
-  assert.equal((await overview.json()).status, 'fresh');
+  const data = await overview.json();
+  assert.equal(data.status, 'fresh');
+  assert.equal(data.dashboardUrl, null);
+  assert.equal(data.scope, 'business');
   const alerts = await request('/api/admin/monitoring/alerts?severity=critical&state=firing');
   assert.equal(alerts.status, 200);
   assert.equal((await alerts.json()).items[0].name, 'ApiDown');
   for (const query of ['severity=unknown', 'state=resolved', 'query=up', 'severity=info&severity=critical']) {
     assert.equal((await request('/api/admin/monitoring/alerts?' + query)).status, 422, query);
   }
+});
+
+test('overview returns the fixed same-origin dashboard in configured business and preprod scopes', async t => {
+  const monitoring = { enabled: true, async overview() { return { status: 'fresh', metrics: {} }; } };
+  for (const scope of ['business', 'preprod']) {
+    const { request } = await fixture(t, monitoring, { BAIRUI_MONITORING_SCOPE: scope,
+      BAIRUI_GRAFANA_AUTH_MODE: scope === 'preprod' ? 'session' : 'bearer',
+      BAIRUI_GRAFANA_UPSTREAM_URL: scope === 'preprod' ? 'http://bairui-preprod-gateway:9494' : 'http://127.0.0.1:9493',
+      ...(scope === 'business' ? { BAIRUI_MONITORING_PROXY_TOKEN: 'a'.repeat(64) } : {}), BAIRUI_GRAFANA_PUBLIC_ORIGIN: 'https://cloud.example.test' });
+    const result = await (await request('/api/admin/monitoring/overview')).json();
+    assert.equal(result.dashboardUrl, '/api/admin/grafana/d/bairui-platform/bairui-platform?kiosk');
+    assert.equal(result.scope, scope);
+  }
+});
+
+test('monitoring scope rejects unknown values and session proxy requires explicit preprod scope', () => {
+  const env = { NODE_ENV: 'test', BAIRUI_AUTH_MODE: 'better-auth', BAIRUI_GRAFANA_AUTH_MODE: 'session',
+    BAIRUI_GRAFANA_UPSTREAM_URL: 'http://bairui-preprod-gateway:9494', BAIRUI_GRAFANA_PUBLIC_ORIGIN: 'https://cloud.example.test' };
+  const options = { store: new MemoryStore({ seed }), auth: { provider: 'better-auth', async resolve() { return null; } } };
+  for (const scope of [undefined, '', 'business', 'other']) assert.throws(() => createApp({ ...options, env: { ...env, BAIRUI_MONITORING_SCOPE: scope } }), /invalid_monitoring_scope/);
+  assert.throws(() => createApp({ ...options, env: { NODE_ENV: 'test', BAIRUI_AUTH_MODE: 'better-auth', BAIRUI_MONITORING_SCOPE: 'other' } }), /invalid_monitoring_scope/);
 });
 test('admin monitoring: disabled and upstream failures fail closed without details', async t => {
   const { request } = await fixture(t, { enabled: false });

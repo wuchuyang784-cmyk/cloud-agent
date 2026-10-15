@@ -128,9 +128,8 @@ try {
   await page.screenshot({ path: join(output, 'desktop.png'), scale: 'css' }); report.screenshots.push('desktop.png');
   await page.getByRole('button', { name: '刷新监控', exact: true }).click(); await iframe.getByText('业务数据库就绪', { exact: true }).waitFor();
   check('manual refresh reloads the actual dashboard', await page.locator('iframe').count() === 1);
-  const popupPending = page.waitForEvent('popup'); await page.getByRole('link', { name: '独立打开 Grafana' }).click();
-  const popup = await popupPending; await popup.getByText('业务数据库就绪', { exact: true }).waitFor({ timeout: 60000 }); await popup.close();
-  check('standalone same-session dashboard opens', true);
+  check('no standalone Grafana link or extra browser tab', await page.getByRole('link', { name: '独立打开 Grafana' }).count() === 0 && context.pages().length === 1);
+  check('embedded Grafana remains on the console origin', new URL(await page.locator('iframe').getAttribute('src'), origin).origin === origin);
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 1000 });
     check(width + 'px admin has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -148,7 +147,7 @@ try {
   check('ordinary real account rejected', (await context.request.get(origin + '/api/admin/grafana/api/user')).status() === 403);
   check('no page runtime errors', errors.length === 0);
   check('no unexpected native Grafana request failures', report.failedRequests.length === 0);
-  report.success = true; console.log('PASS: real Better Auth/PostgreSQL -> same-origin Viewer Grafana -> business Prometheus; desktop/390/320, native queries, refresh, standalone, suspension, logout, ordinary denial.');
+  report.success = true; console.log('PASS: real Better Auth/PostgreSQL -> same-origin Viewer Grafana -> business Prometheus; desktop/390/320, native queries, refresh, no standalone entry, suspension, logout, ordinary denial.');
 } catch (error) {
   if (page) await page.screenshot({ path: join(output, 'failure.png'), scale: 'css' }).catch(() => {});
   console.error('Grafana request failures:', JSON.stringify(report.failedRequests)); throw error;

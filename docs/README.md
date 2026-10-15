@@ -2,6 +2,8 @@
 
 本目录保存 Platform、用户 BFF、BaiLongma 适配、Control Authority、Server Agent 和部署的当前技术规范。
 
+管理端同源监控与统一 HTTPS 入口的最新接入说明：[51-single-origin-admin-monitoring.md](51-single-origin-admin-monitoring.md)；历史 9443 独立入口不再作为新版本配置。
+
 ## 跨仓权威入口
 
 - 整体执行顺序：`BaiRui-agent/docs/AI-DEVELOPMENT-PLAN.md`

@@ -38,3 +38,28 @@ test('host CPU is a measured interval ratio, memory is actual OS data and absent
   const empty = createHostSampler({ cpus: () => [], totalmem: () => 0, freemem: () => 0 });
   assert.ok(Number.isNaN(empty.cpu())); assert.ok(Number.isNaN(empty.memory().used));
 });
+
+test('explicit cloud version 2 connector supports production HTTPS and retains bounded fixed bridge secrets', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'bairui-monitor-cloud-env-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bridge = join(dir, 'bridge-token'), metrics = join(dir, 'metrics-token'), file = join(dir, 'connector.json');
+  await writeFile(bridge, 'a'.repeat(64)); await writeFile(metrics, 'b'.repeat(64));
+  const config = { version: 2, installation: 'a'.repeat(24), upstreamUrl: 'http://127.0.0.1:9493', publicOrigin: 'https://cloud.example.test', metricsPort: 9465,
+    bridgeTokenFile: bridge, metricsTokenFile: metrics };
+  const original = { NODE_ENV: 'production', DATABASE_URL: 'keep', BAIRUI_ADMIN_MONITORING_CONFIG_FILE: file };
+  await writeFile(file, JSON.stringify(config));
+  const result = await loadBusinessMonitoringEnv(original);
+  assert.equal(result.BAIRUI_GRAFANA_PUBLIC_ORIGIN, config.publicOrigin);
+  assert.equal(result.BAIRUI_GRAFANA_AUTH_MODE, 'bearer');
+  assert.equal(result.BAIRUI_MONITORING_SCOPE, 'business');
+  assert.equal(result.BAIRUI_GRAFANA_UPSTREAM_URL, config.upstreamUrl);
+  assert.equal(result.BAIRUI_MONITORING_PROXY_TOKEN, 'a'.repeat(64));
+  assert.equal(result.DATABASE_URL, 'keep');
+  for (const invalid of [{ ...config, version: 1 }, { ...config, publicOrigin: 'http://cloud.example.test' }, { ...config, publicOrigin: 'https://localhost' },
+    { ...config, publicOrigin: 'http://localhost:5173' }, { ...config, publicOrigin: 'https://cloud.example.test/path' },
+    { ...config, upstreamUrl: 'http://localhost:9493' }, { ...config, extra: true }, { ...config, metricsTokenFile: 'relative' }]) {
+    await writeFile(file, JSON.stringify(invalid)); await assert.rejects(loadBusinessMonitoringEnv(original), /invalid_business_monitoring_configuration/);
+  }
+  await writeFile(file, JSON.stringify(config)); await writeFile(bridge, 'a'.repeat(66));
+  await assert.rejects(loadBusinessMonitoringEnv(original), /invalid_business_monitoring_configuration/);
+});

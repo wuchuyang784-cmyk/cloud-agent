@@ -6,6 +6,7 @@ import { monitoringAssets, monitorNames } from './monitoring-config.mjs';
 import { runtimeRules } from './runtime-monitoring-config.mjs';
 import { runtimeNames } from './runtime-deployment-config.mjs';
 import { businessDashboard } from '../apps/platform-api/src/admin/grafana-dashboard.mjs';
+import { monitoringPublicOrigin } from '../apps/platform-api/src/admin/monitoring-origin.mjs';
 
 export const businessLabel = 'bairui.business-monitoring.installation';
 export const businessNames = Object.freeze({
@@ -85,12 +86,14 @@ export function businessRuleTests() {
   ] };
 }
 
-export function businessGrafanaEnvironment(gatewayIp) {
+export function businessGrafanaEnvironment(gatewayIp, publicOrigin) {
+  const consoleOrigin = monitoringPublicOrigin(publicOrigin);
   assert.ok(isIP(gatewayIp) === 4 && !/^(0|127|169|224|255)\./.test(gatewayIp), 'exact_business_bridge_ip_required');
   return {
-    GF_SERVER_ROOT_URL: 'http://localhost:5173/api/admin/grafana/', GF_SERVER_SERVE_FROM_SUB_PATH: 'true',
+    GF_SERVER_ROOT_URL: consoleOrigin + '/api/admin/grafana/', GF_SERVER_SERVE_FROM_SUB_PATH: 'true',
     GF_SECURITY_ADMIN_USER: 'admin', GF_SECURITY_ADMIN_PASSWORD__FILE: '/config/grafana-password',
-    GF_SECURITY_COOKIE_SAMESITE: 'strict', GF_SECURITY_ALLOW_EMBEDDING: 'true',
+    GF_SECURITY_COOKIE_SAMESITE: 'strict', GF_SECURITY_COOKIE_SECURE: String(consoleOrigin.startsWith('https:')), GF_SECURITY_ALLOW_EMBEDDING: 'true',
+    GF_AUTH_BASIC_ENABLED: 'false',
     GF_AUTH_ANONYMOUS_ENABLED: 'false', GF_AUTH_DISABLE_LOGIN_FORM: 'true', GF_USERS_ALLOW_SIGN_UP: 'false',
     GF_AUTH_PROXY_ENABLED: 'true', GF_AUTH_PROXY_HEADER_NAME: 'X-Bairui-Monitor-User', GF_AUTH_PROXY_HEADER_PROPERTY: 'username',
     GF_AUTH_PROXY_AUTO_SIGN_UP: 'true', GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN: 'false', GF_USERS_AUTO_ASSIGN_ORG_ROLE: 'Viewer',
@@ -127,14 +130,17 @@ function directoryPath(directory) {
   return directory.replaceAll('\\', '/').replace(/\/$/, '');
 }
 
-export function businessConnector(installation, directory) {
+export function businessConnector(installation, directory, publicOrigin) {
+  const consoleOrigin = monitoringPublicOrigin(publicOrigin);
+  const host = new URL(consoleOrigin).hostname;
+  assert.ok(consoleOrigin === 'http://localhost:5173' || (consoleOrigin.startsWith('https://') && !['localhost', '[::1]'].includes(host) && !/^127\./.test(host)), 'cloud_business_origin_required');
   assert.match(installation, /^[a-f0-9]{24}$/);
   directoryPath(directory);
-  return { version: 1, installation, upstreamUrl: 'http://127.0.0.1:9493', publicOrigin: 'http://localhost:5173', metricsPort: 9465,
+  return { version: consoleOrigin === 'http://localhost:5173' ? 1 : 2, installation, upstreamUrl: 'http://127.0.0.1:9493', publicOrigin: consoleOrigin, metricsPort: 9465,
     bridgeTokenFile: join(directory, 'bridge-token'), metricsTokenFile: join(directory, 'metrics-token') };
 }
 
-export function businessContainerArguments(kind, { installation, revision, directory, gatewayIp, runtimeTokenFiles = {} }) {
+export function businessContainerArguments(kind, { installation, revision, directory, gatewayIp, publicOrigin, runtimeTokenFiles = {} }) {
   assert.ok(businessKinds.includes(kind), 'invalid_business_monitoring_kind');
   assert.match(installation, /^[a-f0-9]{24}$/); assert.match(revision, /^[a-f0-9]{16}$/);
   const path = directoryPath(directory), user = { prometheus: '65534:65534', grafana: '472:472', caddy: '1000:1000' }[kind];
@@ -153,7 +159,7 @@ export function businessContainerArguments(kind, { installation, revision, direc
     mount(path + '/grafana-password', '/config/grafana-password'); mount(path + '/datasources.json', '/etc/grafana/provisioning/datasources/bairui.yaml');
     mount(path + '/dashboards.json', '/etc/grafana/provisioning/dashboards/bairui.yaml'); mount(path + '/dashboard.json', '/etc/bairui/dashboards/platform.json');
     mount(businessNames.grafanaVolume, '/var/lib/grafana', 'volume', false);
-    for (const [key, value] of Object.entries(businessGrafanaEnvironment(gatewayIp))) args.push('--env', key + '=' + value);
+    for (const [key, value] of Object.entries(businessGrafanaEnvironment(gatewayIp, publicOrigin))) args.push('--env', key + '=' + value);
   } else {
     // Official Caddy binary has this file capability; keep it in the bounding set.
     args.push('--cap-add=NET_BIND_SERVICE');
@@ -190,7 +196,9 @@ export function businessValidationArguments(kind, { directory, runtimeTokenFiles
   return args;
 }
 
-export function businessRevision() {
+export function businessRevision(publicOrigin) {
+  // Rooted placeholder is accepted by both POSIX and Windows path validation;
+  // it is hashed only, never used as an actual host mount.
   return createHash('sha256').update(JSON.stringify({ assets: businessAssets(), images: businessImages, bridge: businessBridgeConfig('0'.repeat(64)),
-    args: businessKinds.map(kind => businessContainerArguments(kind, { installation: '0'.repeat(24), revision: '0'.repeat(16), directory: 'C:/bairui-monitor', gatewayIp: '172.28.0.3' })) })).digest('hex').slice(0, 16);
+    args: businessKinds.map(kind => businessContainerArguments(kind, { installation: '0'.repeat(24), revision: '0'.repeat(16), directory: '/bairui-monitor', gatewayIp: '172.28.0.3', publicOrigin })) })).digest('hex').slice(0, 16);
 }

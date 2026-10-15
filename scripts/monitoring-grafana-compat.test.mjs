@@ -1,175 +1,214 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
+import { docker, inspect, localDocker, root } from './preprod.mjs';
 import { gatewayConfig } from './preprod-config.mjs';
+import { monitoringAssets, monitoringStack, monitorImages, monitorNames } from './monitoring-config.mjs';
 
-const suffix = randomBytes(6).toString('hex');
-const names = { network: 'bairui-grafana-compat-' + suffix, auth: 'bairui-auth-compat-' + suffix,
-  caddy: 'bairui-caddy-compat-' + suffix, grafana: 'bairui-grafana-compat-' + suffix };
-const apiImage = 'bairui/platform-api-preprod:13b3fb4e7579ed38';
+// Real current API -> generated Caddy -> Grafana/Prometheus. Authentication is a
+// disposable MemoryStore fixture, not proof of a real Better Auth deployment.
+const suffix = randomBytes(8).toString('hex'), label = 'bairui.grafana.compat';
+const names = Object.fromEntries(['network', 'api', 'gateway', 'grafana', 'prometheus'].map(kind => [kind, 'bairui-grafana-compat-' + kind + '-' + suffix]));
 const caddyImage = 'caddy:2.10.2-alpine';
-const grafanaImage = 'grafana/grafana:13.2.2';
-
-function docker(args, { timeout = 60_000 } = {}) {
-  return new Promise((resolve, reject) => execFile('docker', args, { encoding: 'utf8', timeout, windowsHide: true }, (error, stdout, stderr) => {
-    if (error) { error.message += '\n' + stderr; reject(error); } else resolve((stdout + (args[0] === 'logs' ? stderr : '')).trim());
-  }));
-}
-async function freePort() {
-  return await new Promise((resolve, reject) => { const server = createServer(); server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); });
-}
-async function waitFor(url, predicate, timeout = 60_000) {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) {
-    try { const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(2000) }); if (predicate(response)) return response; } catch {}
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-  throw new Error('compatibility_service_timeout: ' + url);
-}
+const apiImage = 'bairui/platform-api-preprod:984167c866f5c602';
 const directory = await mkdtemp(join(tmpdir(), 'bairui-grafana-compat-'));
+const output = join(root, 'output', 'monitoring-single-origin', new Date().toISOString().replace(/[:.]/g, '-'));
+const report = { success: false, authentication: 'isolated fixture, not real Better Auth', checks: [] };
+const checks = message => { report.checks.push(message); console.log('PASS: ' + message); };
+let browser;
+
+async function waitFor(url, status = 200, headers = {}, timeout = 90000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(3000) });
+      if (response.status === status) return response;
+      await response.body?.cancel();
+    } catch {}
+    await delay(500);
+  }
+  throw new Error('single_origin_service_timeout');
+}
+const mount = (source, target) => ['--mount', 'type=bind,source=' + source.replaceAll('\\', '/') + ',target=' + target + ',readonly'];
+async function removeOwned(kind, name) {
+  const item = await inspect(kind, name);
+  if (!item) return;
+  assert.equal((kind === 'container' ? item.Config.Labels : item.Labels)[label], suffix, 'temporary_resource_owner_mismatch');
+  await docker(kind === 'container' ? ['rm', '-f', item.Id] : [kind, 'rm', item.Id]);
+}
+
 try {
-  const port = await freePort();
-  const productionCaddyfile = join(directory, 'ProductionCaddyfile');
-  await writeFile(productionCaddyfile, gatewayConfig({ monitoring: { enabled: true } }), 'utf8');
-  await docker(['run', '--rm', '--mount', 'type=bind,source=' + productionCaddyfile + ',target=/etc/caddy/Caddyfile,readonly', caddyImage,
-    'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile']);
-  const caddyfile = join(directory, 'Caddyfile');
-  await writeFile(caddyfile, `{
-  admin off
-  auto_https off
-}
-:8080 {
-  header Content-Security-Policy "frame-ancestors http://localhost:8443"
-  request_header -X-Bairui-Monitor-User
-  request_header -X-Bairui-Monitor-Role
-  @emergencyLogin path /login /login/* /logout
-  handle @emergencyLogin {
-    reverse_proxy {
-      dynamic a {
-        name tasks.bairui-monitor_grafana
-        port 3000
-        refresh 2s
+  await localDocker();
+  await mkdir(output, { recursive: true });
+  const linuxRevision = await docker(['run', '--rm', '--pull=never', '--network', 'none', '--label', label + '=' + suffix,
+    ...mount(join(root, 'scripts'), '/app/scripts'), ...mount(join(root, 'apps/platform-api/src'), '/app/apps/platform-api/src'),
+    apiImage, 'node', '--input-type=module', '-e',
+    "import{businessRevision}from'./scripts/business-monitoring-config.mjs';console.log(businessRevision('https://console.example.com'))"]);
+  assert.match(linuxRevision, /^[a-f0-9]{16}$/);
+  checks('cloud business configuration revision computes inside actual Linux Node runtime');
+  for (const publicOrigin of [undefined, 'https://console.example.com']) {
+    const path = join(directory, 'validate.Caddyfile');
+    await writeFile(path, gatewayConfig({ monitoring: { enabled: true }, publicOrigin }));
+    await docker(['run', '--rm', '--pull=never', '--network', 'none', '--label', label + '=' + suffix,
+      ...mount(path, '/etc/caddy/Caddyfile'), caddyImage, 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile']);
+  }
+  checks('official Caddy validates generated local and public-domain configurations');
+
+  // Fixture changes transport only: the internal authenticated listener and all
+  // generated routing remain exactly the deployment generator's output.
+  const caddyfile = gatewayConfig({ monitoring: { enabled: true } }).replace('https://localhost {', ':8080 {').replace('  tls internal\n', '');
+  await writeFile(join(directory, 'Caddyfile'), caddyfile);
+  await writeFile(join(directory, 'control'), 'active');
+  await docker(['network', 'create', '--label', label + '=' + suffix, names.network]);
+  await docker(['run', '-d', '--pull=never', '--name', names.gateway, '--label', label + '=' + suffix,
+    '--network', names.network, '--network-alias', 'bairui-preprod-gateway', '--read-only', '--cap-drop=ALL', '--cap-add=NET_BIND_SERVICE',
+    '--tmpfs', '/config', '--tmpfs', '/data', '--tmpfs', '/tmp', '-p', '127.0.0.1::8080',
+    ...mount(join(directory, 'Caddyfile'), '/etc/caddy/Caddyfile'),
+    ...mount(join(root, 'apps/admin-console/dist'), '/srv/admin'), caddyImage]);
+  const gateway = await inspect('container', names.gateway);
+  assert.equal(gateway.State.Running, true);
+  assert.deepEqual(Object.keys(gateway.HostConfig.PortBindings), ['8080/tcp']);
+  const port = gateway.NetworkSettings.Ports['8080/tcp'][0].HostPort;
+  const origin = 'http://localhost:' + port;
+  const gatewayIp = gateway.NetworkSettings.Networks[names.network].IPAddress;
+
+  const fixture = `
+    import {readFile} from 'node:fs/promises';
+    import {createApp} from '/app/src/app.mjs';
+    import {MemoryStore} from '/app/src/store.mjs';
+    const store=new MemoryStore({seed:{users:[
+      {id:'viewer',email:'viewer@example.test',organizationId:'org-a',role:'user'},
+      {id:'ordinary',email:'ordinary@example.test',organizationId:'org-b',role:'user'}]}});
+    store.platformRoles=new Map([['viewer',{role:'platform_viewer',revokedAt:null}]]);
+    const app=createApp({store,env:{NODE_ENV:'test',BAIRUI_AUTH_MODE:'better-auth',
+      BAIRUI_GRAFANA_UPSTREAM_URL:'http://bairui-preprod-gateway:9494',BAIRUI_GRAFANA_AUTH_MODE:'session',
+      BAIRUI_GRAFANA_PUBLIC_ORIGIN:${JSON.stringify(origin)},BAIRUI_MONITORING_SCOPE:'preprod',
+      BAIRUI_PROMETHEUS_URL:'http://${monitorNames.prometheus}:9090'},
+      auth:{provider:'better-auth',async resolve(req){
+        const mode=(await readFile('/fixture/control','utf8')).trim();
+        if(mode==='revoked')return null;
+        store.accountGovernance=mode==='paused'?new Map([['viewer',{status:'suspended',version:1}]]):new Map();
+        const id=req.headers.cookie==='platform=valid'?'viewer':req.headers.cookie==='platform=ordinary'?'ordinary':null;
+        const user=id&&store.findUser(id);return user&&{userId:user.id,organizationId:user.organizationId,email:user.email};
+      }}});
+    app.listen(8080,'0.0.0.0');
+  `;
+  await writeFile(join(directory, 'api-fixture.mjs'), fixture);
+  await docker(['run', '-d', '--pull=never', '--name', names.api, '--label', label + '=' + suffix,
+    '--network', names.network, '--network-alias', 'tasks.bairui-preprod_api', '--read-only', '--cap-drop=ALL', '--memory=384m', '--pids-limit=128',
+    ...mount(join(root, 'apps/platform-api/src'), '/app/src'), ...mount(directory, '/fixture'), apiImage, 'node', '/fixture/api-fixture.mjs']);
+
+  const assets = monitoringAssets();
+  await mkdir(join(directory, 'dashboards'));
+  await writeFile(join(directory, 'dashboards/platform.json'), JSON.stringify(assets['dashboard.json']));
+  await writeFile(join(directory, 'datasources.json'), JSON.stringify(assets['datasources.json']));
+  await writeFile(join(directory, 'dashboards.json'), JSON.stringify(assets['dashboards.json']));
+  await writeFile(join(directory, 'prometheus.json'), JSON.stringify({ global: { scrape_interval: '5s' }, scrape_configs: [{ job_name: 'fixture-prometheus', static_configs: [{ targets: ['localhost:9090'] }] }] }));
+  await docker(['run', '-d', '--pull=never', '--name', names.prometheus, '--label', label + '=' + suffix,
+    '--network', names.network, '--network-alias', monitorNames.prometheus, '--read-only', '--cap-drop=ALL', '--memory=256m',
+    '--tmpfs', '/prometheus:uid=65534,gid=65534', ...mount(join(directory, 'prometheus.json'), '/etc/prometheus/prometheus.yml'), monitorImages.prometheus]);
+  const environment = monitoringStack({ installation: 'a'.repeat(24), nodeId: 'fixture-node', revision: 'b'.repeat(16),
+    monitoring: { enabled: true, gatewayIp }, publicOrigin: origin }).services.grafana.environment;
+  // HTTP transport is fixture-only. Every other Grafana setting is generated by
+  // the real deployment, including the disabled Grafana alert-rule subsystem.
+  environment.GF_SECURITY_COOKIE_SECURE = 'false';
+  await writeFile(join(directory, 'grafana-password'), randomBytes(24).toString('hex'), { mode: 0o600 });
+  await docker(['run', '-d', '--pull=never', '--name', names.grafana, '--label', label + '=' + suffix,
+    '--network', names.network, '--network-alias', 'tasks.' + monitorNames.grafana, '--read-only', '--cap-drop=ALL', '--memory=384m',
+    '--tmpfs', '/var/lib/grafana:uid=472,gid=472', '--tmpfs', '/tmp',
+    ...mount(join(directory, 'grafana-password'), '/run/secrets/grafana-password'),
+    ...mount(join(directory, 'datasources.json'), '/etc/grafana/provisioning/datasources/bairui.yaml'),
+    ...mount(join(directory, 'dashboards.json'), '/etc/grafana/provisioning/dashboards/bairui.yaml'),
+    ...mount(join(directory, 'dashboards'), '/etc/bairui/dashboards'),
+    ...Object.entries(environment).flatMap(([key, value]) => ['--env', key + '=' + value]), monitorImages.grafana]);
+  const prefix = origin + '/api/admin/grafana';
+  const headers = { cookie: 'platform=valid' };
+  await waitFor(prefix + '/api/health', 200, headers);
+  for (const [cookie, status] of [['', 401], ['platform=ordinary', 403], ['grafana_session=forged', 401]]) {
+    assert.equal((await fetch(prefix + '/api/user', { headers: { cookie, 'x-bairui-monitor-user': 'admin', 'x-bairui-monitor-role': 'Admin' } })).status, status);
+  }
+  checks('anonymous, ordinary user, forged identity and Grafana cookies cannot bypass platform access');
+  const identity = await fetch(prefix + '/api/user', { headers });
+  assert.equal(identity.status, 200); assert.equal(identity.headers.get('set-cookie'), null);
+  assert.equal((await identity.json()).login, 'bairui:viewer');
+  const memberships = await (await fetch(prefix + '/api/user/orgs', { headers })).json();
+  assert.equal(memberships[0].role, 'Viewer');
+  const dashboard = await (await fetch(prefix + '/api/dashboards/uid/bairui-platform', { headers })).json();
+  assert.equal(dashboard.meta.folderUid, 'bairui-platform-folder');
+  assert.equal((await fetch(prefix + '/api/folders/' + dashboard.meta.folderUid + '?accesscontrol=true&isLegacyCall=true', { headers })).status, 200);
+  checks('actual preprod dashboard provisioning and folder discovery work through the fixed Viewer gateway');
+  const html = await (await fetch(prefix + '/d/bairui-platform/bairui-platform?kiosk', { headers })).text();
+  assert.match(html, /Grafana/);
+  const assetsToCheck = [...html.matchAll(/(?:src|href)="([^"#?]+)"/g)].map(match => new URL(match[1], prefix + '/')).filter(url => url.pathname.startsWith('/api/admin/grafana/public/')).slice(0, 5);
+  assert.ok(assetsToCheck.length >= 2, 'native_assets_missing');
+  for (const url of assetsToCheck) { assert.equal(url.origin, origin); const response = await fetch(url, { headers }); assert.equal(response.status, 200); await response.body?.cancel(); }
+  const body = { from: String(Date.now() - 60000), to: String(Date.now()), queries: [{ refId: 'A', expr: 'sum(up{job="bairui-api"}) or vector(0)', datasource: { type: 'prometheus', uid: 'bairui-prometheus' }, instant: true }] };
+  const post = value => ({ method: 'POST', headers: { ...headers, origin, 'content-type': 'application/json' }, body: JSON.stringify(value) });
+  const query = await fetch(prefix + '/api/ds/query', post(body));
+  assert.equal(query.status, 200); assert.equal((await query.json()).results.A.status, 200);
+  assert.equal((await fetch(prefix + '/api/ds/query', post({ ...body, queries: [{ ...body.queries[0], expr: 'up' }] }))).status, 422);
+  for (const path of ['/login', '/api/admin/users', '/api/datasources/proxy/uid/bairui-prometheus/api/v1/query?query=up']) assert.equal((await fetch(prefix + path, { headers })).status, 404);
+  checks('native HTML/static assets and fixed Prometheus queries share one origin; independent login and arbitrary queries denied');
+
+  if (process.env.BAIRUI_PLAYWRIGHT_MODULE) {
+    const { chromium } = await import(pathToFileURL(process.env.BAIRUI_PLAYWRIGHT_MODULE).href);
+    browser = await chromium.launch({ headless: true, ...(process.env.BAIRUI_BROWSER_EXECUTABLE ? { executablePath: process.env.BAIRUI_BROWSER_EXECUTABLE } : {}) });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    await context.addCookies([{ name: 'platform', value: 'valid', url: origin }]);
+    const page = await context.newPage();
+    const failedNative = [], pageErrors = [], queriedPanels = new Set();
+    page.on('pageerror', error => pageErrors.push(error.message));
+    page.on('response', response => {
+      const url = new URL(response.url());
+      if (!url.pathname.startsWith('/api/admin/grafana/')) return;
+      if (response.status() >= 400 && !url.pathname.includes('zh-Hans')) failedNative.push({ path: url.pathname, status: response.status() });
+      if (url.pathname.endsWith('/api/ds/query') && response.status() === 200) {
+        for (const query of response.request().postDataJSON()?.queries ?? []) queriedPanels.add(query.expr);
       }
-      header_up -X-Bairui-Monitor-User
+    });
+    await page.goto(origin + '/admin/'); await page.getByRole('button', { name: '运行监控', exact: true }).click();
+    const iframe = page.frameLocator('iframe');
+    await iframe.getByText('API 可采集副本 / 预期 2', { exact: true }).waitFor({ timeout: 45000 });
+    for (const panel of assets['dashboard.json'].panels) await iframe.getByText(panel.title, { exact: true }).scrollIntoViewIfNeeded();
+    const queryDeadline = Date.now() + 30000;
+    while (queriedPanels.size < assets['dashboard.json'].panels.length && Date.now() < queryDeadline) await delay(100);
+    assert.equal(queriedPanels.size, assets['dashboard.json'].panels.length, 'all preprod panels must complete native queries');
+    assert.deepEqual(failedNative, [], 'native Grafana request failures'); assert.deepEqual(pageErrors, []);
+    assert.equal(await iframe.getByText('Unexpected alert rules response.', { exact: true }).count(), 0);
+    assert.equal(await page.getByRole('link', { name: '独立打开 Grafana' }).count(), 0);
+    const refreshed = page.waitForResponse(response => response.url() === prefix + '/api/health');
+    await page.getByRole('button', { name: '刷新监控', exact: true }).click(); await refreshed;
+    await iframe.getByText('API 可采集副本 / 预期 2', { exact: true }).waitFor();
+    await iframe.getByText('API 可采集副本 / 预期 2', { exact: true }).scrollIntoViewIfNeeded();
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 });
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: join(output, 'admin-' + width + '.png') });
     }
+    assert.equal(context.pages().length, 1);
+    checks('browser admin embeds all 12 queried Grafana panels without native request errors, retry rechecks health, desktop/mobile keep one tab and one origin');
   }
-  @emergencyPublic path /public/* /robots.txt /favicon.ico
-  handle @emergencyPublic {
-    reverse_proxy {
-      dynamic a {
-        name tasks.bairui-monitor_grafana
-        port 3000
-        refresh 2s
-      }
-      header_up -X-Bairui-Monitor-User
-      header_up -X-Bairui-Monitor-Role
-      header_up -Cookie
-      header_up -Authorization
-      header_down -Set-Cookie
-    }
-  }
-  @emergencySession header_regexp grafanaSession Cookie "(?i)(^|;\\s*)grafana_session="
-  handle @emergencySession {
-    reverse_proxy {
-      dynamic a {
-        name tasks.bairui-monitor_grafana
-        port 3000
-        refresh 2s
-      }
-      header_up -X-Bairui-Monitor-User
-    }
-  }
-  handle {
-    forward_auth auth:8080 {
-      uri /api/admin/monitoring/access
-      copy_headers X-Bairui-Monitor-User X-Bairui-Monitor-Role
-    }
-    reverse_proxy {
-      dynamic a {
-        name tasks.bairui-monitor_grafana
-        port 3000
-        refresh 2s
-      }
-      header_up -Cookie
-      header_up -Authorization
-      header_down -Set-Cookie
-    }
-  }
-}
-`, 'utf8');
-  await docker(['network', 'create', names.network]);
-  const authCode = `import{createServer}from'node:http';createServer((q,s)=>{if(q.url==='/api/admin/monitoring/access'&&q.headers.cookie?.includes('platform=valid')){s.writeHead(204,{'X-Bairui-Monitor-User':'bairui:test-user','X-Bairui-Monitor-Role':'Viewer'});s.end()}else{s.writeHead(403);s.end()}}).listen(8080,'0.0.0.0')`;
-  await docker(['run', '-d', '--name', names.auth, '--network', names.network, '--network-alias', 'auth', '--read-only', '--cap-drop', 'ALL', apiImage,
-    'node', '--input-type=module', '-e', authCode]);
-  await docker(['run', '-d', '--name', names.caddy, '--network', names.network, '--network-alias', 'caddy', '--read-only', '--cap-drop', 'ALL', '--cap-add', 'NET_BIND_SERVICE',
-    '--tmpfs', '/config', '--tmpfs', '/data', '-p', '127.0.0.1:' + port + ':8080', '--mount', 'type=bind,source=' + caddyfile + ',target=/etc/caddy/Caddyfile,readonly', caddyImage]);
-  await new Promise(resolve => setTimeout(resolve, 500));
-  if (await docker(['inspect', '-f', '{{.State.Running}}', names.caddy]) !== 'true') throw new Error('caddy_start_failed');
-  const caddyIp = await docker(['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', names.caddy]);
-  await docker(['run', '-d', '--name', names.grafana, '--network', names.network, '--network-alias', 'grafana', '--network-alias', 'tasks.bairui-monitor_grafana', '--read-only', '--cap-drop', 'ALL', '--tmpfs', '/var/lib/grafana', '--tmpfs', '/tmp',
-    '-e', 'GF_SERVER_ROOT_URL=http://localhost:' + port, '-e', 'GF_SECURITY_ADMIN_USER=admin', '-e', 'GF_SECURITY_ADMIN_PASSWORD=compat-admin-secret',
-    '-e', 'GF_AUTH_ANONYMOUS_ENABLED=false', '-e', 'GF_USERS_ALLOW_SIGN_UP=false', '-e', 'GF_AUTH_PROXY_ENABLED=true',
-    '-e', 'GF_AUTH_PROXY_HEADER_NAME=X-Bairui-Monitor-User', '-e', 'GF_AUTH_PROXY_HEADER_PROPERTY=username', '-e', 'GF_AUTH_PROXY_AUTO_SIGN_UP=true',
-    '-e', 'GF_AUTH_PROXY_ENABLE_LOGIN_TOKEN=false', '-e', 'GF_AUTH_PROXY_HEADERS=Role:X-Bairui-Monitor-Role', '-e', 'GF_AUTH_PROXY_SYNC_TTL=0',
-    '-e', 'GF_AUTH_PROXY_WHITELIST=' + caddyIp, '-e', 'GF_USERS_AUTO_ASSIGN_ORG_ROLE=Viewer',
-    '-e', 'GF_SECURITY_ALLOW_EMBEDDING=true', '-e', 'GF_ANALYTICS_REPORTING_ENABLED=false', grafanaImage]);
-  const origin = 'http://127.0.0.1:' + port;
-  const login = await waitFor(origin + '/login', response => response.status === 200);
-  assert.match(login.headers.get('content-security-policy') ?? '', /frame-ancestors/);
-  const user = await fetch(origin + '/api/user', { headers: { cookie: 'platform=valid' }, redirect: 'manual' });
-  assert.equal(user.status, 200);
-  assert.equal((await user.json()).login, 'bairui:test-user');
-  assert.equal(user.headers.get('set-cookie'), null);
-  const orgs = await fetch(origin + '/api/user/orgs', { headers: { cookie: 'platform=valid' } });
-  assert.equal((await orgs.json())[0].role, 'Viewer');
-  const adminLogin = await fetch(origin + '/login', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ user: 'admin', password: 'compat-admin-secret' }), redirect: 'manual' });
-  assert.equal(adminLogin.status, 200);
-  const adminCookie = adminLogin.headers.get('set-cookie')?.match(/grafana_session=[^;,]+/)?.[0];
-  assert.ok(adminCookie, 'grafana_admin_session_missing');
-  const lookup = await fetch(origin + '/api/users/lookup?loginOrEmail=' + encodeURIComponent('bairui:test-user'), { headers: { cookie: adminCookie } });
-  const technicalUser = await lookup.json();
-  assert.ok(technicalUser.id);
-  const promoted = await fetch(origin + '/api/org/users/' + technicalUser.id, { method: 'PATCH', headers: { cookie: adminCookie, 'content-type': 'application/json' }, body: JSON.stringify({ role: 'Editor' }) });
-  assert.equal(promoted.status, 200);
-  const resynced = await fetch(origin + '/api/user/orgs', { headers: { cookie: 'platform=valid' } });
-  assert.equal((await resynced.json())[0].role, 'Viewer');
-  const forged = await fetch(origin + '/api/user', { headers: { 'x-bairui-monitor-user': 'bairui:forged' }, redirect: 'manual' });
-  assert.equal(forged.status, 403);
-  const fakeSession = await fetch(origin + '/api/user', { headers: { cookie: 'grafana_session=invalid' }, redirect: 'manual' });
-  assert.notEqual(fakeSession.status, 200);
-  await docker(['stop', names.auth]);
-  const emergencyPage = await fetch(origin + '/login');
-  assert.equal(emergencyPage.status, 200);
-  const emergencyHtml = await emergencyPage.text();
-  const assets = [...emergencyHtml.matchAll(/(?:src|href)="([^"#?]+)"/g)].map(match => new URL(match[1], origin + '/login').pathname).filter(path => path.startsWith('/public/'));
-  assert.ok(assets.length > 0, 'grafana_login_assets_missing');
-  for (const asset of assets) assert.equal((await fetch(origin + asset)).status, 200, asset);
-  const emergencyLogin = await fetch(origin + '/login', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ user: 'admin', password: 'compat-admin-secret' }), redirect: 'manual' });
-  assert.equal(emergencyLogin.status, 200);
-  const emergencyCookie = emergencyLogin.headers.get('set-cookie')?.match(/grafana_session=[^;,]+/)?.[0];
-  assert.ok(emergencyCookie, 'emergency_grafana_session_missing');
-  const emergencyUser = await fetch(origin + '/api/user', { headers: { cookie: emergencyCookie } });
-  assert.equal(emergencyUser.status, 200);
-  assert.equal((await emergencyUser.json()).login, 'admin');
-  const unavailable = await fetch(origin + '/api/user', { headers: { cookie: 'platform=valid' }, redirect: 'manual' });
-  assert.ok([502, 503].includes(unavailable.status));
-  console.log('Grafana/Caddy compatibility: PASS (platform Viewer, forged identity rejected, emergency login independent)');
-} catch (error) {
-  for (const name of [names.auth, names.caddy, names.grafana]) {
-    const status = await docker(['inspect', '-f', '{{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}', name]).catch(inspectError => inspectError.message);
-    const logs = await docker(['logs', '--tail', '80', name]).catch(logError => logError.message);
-    console.error('\n[' + name + '] ' + status + '\n' + logs);
-  }
-  throw error;
+  await writeFile(join(directory, 'control'), 'paused');
+  assert.equal((await fetch(prefix + '/api/user', { headers })).status, 403);
+  await writeFile(join(directory, 'control'), 'revoked');
+  assert.equal((await fetch(prefix + '/api/user', { headers })).status, 401);
+  await writeFile(join(directory, 'control'), 'active');
+  await docker(['stop', '--timeout', '5', names.grafana]);
+  assert.equal((await fetch(prefix + '/api/user', { headers })).status, 503);
+  assert.equal((await fetch(origin + '/api/admin/me', { headers })).status, 200);
+  checks('suspension and revoked fixture session deny next request; Grafana failure leaves account management available');
+  report.success = true;
 } finally {
-  for (const name of [names.grafana, names.caddy, names.auth]) await docker(['rm', '-f', name]).catch(() => {});
-  await docker(['network', 'rm', names.network]).catch(() => {});
+  await browser?.close();
+  for (const name of [names.grafana, names.prometheus, names.api, names.gateway]) await removeOwned('container', name);
+  await removeOwned('network', names.network);
+  assert.equal(dirname(resolve(directory)), resolve(tmpdir())); assert.ok(resolve(directory).startsWith(join(resolve(tmpdir()), 'bairui-grafana-compat-')));
   await rm(directory, { recursive: true, force: true });
+  report.cleaned = true;
+  await mkdir(output, { recursive: true });
+  await writeFile(join(output, 'report.json'), JSON.stringify(report, null, 2));
 }

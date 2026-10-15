@@ -5,8 +5,8 @@ import { writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { docker, owned, loadState, saveState, localDocker, checkResources, output, withLock, up, containers, waitUntil, request } from './preprod.mjs';
-import { label, names, apiImage } from './preprod-config.mjs';
-import { monitoringStack, monitoringAssets, monitorNames, monitorVolumes, monitorSecrets, monitorServices, monitorImages, monitorConfigName, monitoringRevision, monitorOrigin } from './monitoring-config.mjs';
+import { label, names, apiImage, consolePublicOrigin } from './preprod-config.mjs';
+import { monitoringStack, monitoringAssets, monitorNames, monitorVolumes, monitorSecrets, monitorServices, monitorImages, monitorConfigName, monitoringRevision } from './monitoring-config.mjs';
 import { validateMonitoring } from './monitoring-rules.test.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
 import { runtimeNames } from './runtime-deployment-config.mjs';
@@ -88,8 +88,8 @@ export async function deployMonitoring(state) {
     }
     return true;
   }, '四项监控服务启动', 240000);
-  const health = await request(monitorOrigin + '/login');
-  if (health.status !== 200 || !health.text.includes('Grafana')) throw new Error('Grafana HTTPS 应急入口健康检查失败。');
+  const health = await request('/api/admin/grafana/api/health');
+  if (health.status !== 401) throw new Error('管理端同源 Grafana 匿名拒绝检查失败。');
   state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision(state.monitoring?.runtime);
   await saveState(state);
 }
@@ -127,7 +127,7 @@ export async function monitorUp() {
   await saveState(state);
   console.log('接入监控会重建仅预发的 Caddy 和 API，入口短暂中断；数据库与既有 Secret 保留。');
   await up();
-  console.log('监控已就绪：' + monitorOrigin + '。账号 admin；显式运行 npm run monitor:password 复制独立密码。');
+  console.log('监控已就绪：' + consolePublicOrigin(state.publicOrigin) + '/admin/。使用平台账号进入运行监控，无独立 Grafana 端口或登录入口。');
 }
 
 export async function stopMonitoringServices(state) {
@@ -152,7 +152,7 @@ async function monitorStatus() {
   const state = await context();
   if (!state.monitoring?.resourcesReady) { console.log('尚未安装监控。运行 npm run monitor:up。'); return; }
   await assertMonitoringResources(state);
-  console.log('监控：' + monitorOrigin + ' | 记录状态：' + state.monitoring.phase);
+  console.log('监控：' + consolePublicOrigin(state.publicOrigin) + '/admin/ | 记录状态：' + state.monitoring.phase);
   for (const key of monitorServices) {
     const rows = await containers(monitorNames[key], state);
     console.log(key + '：运行 ' + rows.length + '，健康 ' + rows.filter(row => row.State.Health?.Status === 'healthy').length);
@@ -192,7 +192,7 @@ async function monitorPassword() {
       { windowsHide: true, timeout: 15000 }, error => error ? reject(new Error('无法写入本机剪贴板。')) : done());
     child.stdin.on('error', () => {}); child.stdin.end(password);
   });
-  console.log('Grafana 独立管理员密码已复制到本机剪贴板，未输出到终端。用户名：admin。使用后请清空剪贴板。');
+  console.log('Grafana 内部维护凭据已复制到本机剪贴板，未输出到终端；不提供独立浏览器登录入口。使用后请清空剪贴板。');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -3,17 +3,29 @@ import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { docker, localDocker, loadState, owned, containers, request, output, withLock, waitUntil, waitReady } from './preprod.mjs';
-import { names, apiImage } from './preprod-config.mjs';
-import { monitorNames, monitorServices, monitorSecrets, monitorImages, monitorOrigin } from './monitoring-config.mjs';
-import { assertMonitoringResources, alertRecords, grafanaPassword } from './monitoring.mjs';
+import { names, apiImage, consolePublicOrigin, gatewayPublish } from './preprod-config.mjs';
+import { monitorNames, monitorServices, monitorSecrets, monitorImages } from './monitoring-config.mjs';
+import { assertMonitoringResources, alertRecords } from './monitoring.mjs';
 import { validateMonitoring } from './monitoring-rules.test.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
-import { grafanaAdminLogin, grafanaSessionCookie } from './preprod-acceptance.mjs';
+import { viewerGrantCommand, cleanupMonitoringIdentity } from './preprod-acceptance.mjs';
+import { authRetryDelay } from './swarm-scheduler-config.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const runId = new Date().toISOString().replace(/[:.]/g, '-') + '-' + randomBytes(3).toString('hex');
 const report = { runId, success: false, startedAt: new Date().toISOString(), checks: [] };
 const passed = message => { report.checks.push(message); console.log('通过：' + message); };
 let state;
+let viewerCookie = '', viewerGrant;
+const grafanaPath = '/api/admin/grafana';
+
+async function platformSignUp(body, attempt = 0) {
+  const response = await request('/api/auth/sign-up/email', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const wait = authRetryDelay('/api/auth/sign-up/email', response.status, response.headers['retry-after'] ?? null, attempt);
+  if (wait !== null) { await delay(wait); return platformSignUp(body, attempt + 1); }
+  assert.equal(response.status, 200, 'monitoring_fixture_signup');
+  return response;
+}
 
 async function inApi(code, input = {}) {
   const rows = await containers(names.api, state);
@@ -36,9 +48,9 @@ async function verify() {
   await assertMonitoringResources(state);
   await validateMonitoring(state.monitoring.runtime);
   const gateway = await owned('container', names.gateway, state);
-  for (const [port, host] of [['443/tcp', '8443'], ['9443/tcp', '9443']]) {
-    assert.deepEqual(gateway.HostConfig.PortBindings[port], [{ HostIp: '127.0.0.1', HostPort: host }]);
-  }
+  const [hostIp, hostPort] = gatewayPublish(state.publicOrigin).split(':');
+  assert.deepEqual(gateway.HostConfig.PortBindings['443/tcp'], [{ HostIp: hostIp, HostPort: hostPort }]);
+  assert.deepEqual(Object.keys(gateway.HostConfig.PortBindings), ['443/tcp']);
   for (const key of monitorServices) {
     const service = await owned('service', monitorNames[key], state);
     assert.equal(service.Spec.EndpointSpec?.Ports?.length ?? 0, 0);
@@ -50,19 +62,27 @@ async function verify() {
   for (const path of ['/metrics', '/metrics?token=not-a-secret', '/prometheus/api/v1/query', '/alertmanager/api/v2/alerts', '/alerts']) {
     assert.equal((await request(path)).status, 404, 'public_monitoring_path_denied');
   }
-  assert.equal((await request(monitorOrigin + '/metrics')).status, 404);
-  const unauth = await request(monitorOrigin + '/api/datasources');
+  const unauth = await request(grafanaPath + '/api/datasources');
   assert.ok([401, 403].includes(unauth.status));
-  const password = await grafanaPassword(state);
-  const login = await request(monitorOrigin + '/login', grafanaAdminLogin(password));
-  assert.equal(login.status, 200);
-  const headers = { cookie: grafanaSessionCookie(login.headers), origin: monitorOrigin };
-  const dashboard = await request(monitorOrigin + '/api/dashboards/uid/bairui-platform', { headers });
+  const password = randomBytes(24).toString('hex');
+  const signup = await platformSignUp({ name: 'Monitoring acceptance', email: 'monitor-' + runId.toLowerCase() + '@example.test', password });
+  viewerCookie = (signup.headers['set-cookie'] ?? []).map(value => value.split(';')[0]).join('; ');
+  assert.ok(viewerCookie, 'platform_cookie_missing');
+  const identity = await request('/api/auth/me', { headers: { cookie: viewerCookie } });
+  assert.equal(identity.status, 200);
+  const userId = JSON.parse(identity.text).user.userId;
+  const [db] = await containers(names.db, state);
+  viewerGrant = viewerGrantCommand(db.Id, userId);
+  await docker(viewerGrant.args, { input: viewerGrant.input });
+  const headers = { cookie: viewerCookie };
+  const dashboard = await request(grafanaPath + '/api/dashboards/uid/bairui-platform', { headers });
   assert.equal(dashboard.status, 200);
   assert.ok(JSON.parse(dashboard.text).dashboard.panels.length >= 8);
-  const datasource = await request(monitorOrigin + '/api/datasources/uid/bairui-prometheus/health', { headers });
-  assert.equal(datasource.status, 200);
-  passed('CA 验证的 HTTPS、Grafana 独立认证、看板数据源、回环端口与平台监控路径隔离');
+  const orgs = await request(grafanaPath + '/api/user/orgs', { headers });
+  assert.equal(orgs.status, 200); assert.equal(JSON.parse(orgs.text)[0].role, 'Viewer');
+  assert.equal((await request(grafanaPath + '/login', { headers })).status, 404);
+  assert.equal((await request(grafanaPath + '/api/datasources/uid/bairui-prometheus/health', { headers })).status, 404, 'no general datasource proxy');
+  passed('单一 HTTPS 入口、平台真实会话、Grafana Viewer、固定面板与独立登录拒绝');
 
   await waitUntil(async () => {
     const result = await privateJson('prometheus', '/api/v1/targets');
@@ -126,11 +146,11 @@ async function verify() {
   for (const record of beforeRecords) assert.ok(afterRecords.some(r => JSON.stringify(r) === JSON.stringify(record)));
   const history = await privateJson('prometheus', '/api/v1/query?query=' + encodeURIComponent('count_over_time(up{job="bairui-api"}[10m])'));
   assert.ok(history.body.data.result.some(r => Number(r.value[1]) >= 5));
-  assert.equal((await request(monitorOrigin + '/api/dashboards/uid/bairui-platform', { headers })).status, 200);
+  assert.equal((await request(grafanaPath + '/api/dashboards/uid/bairui-platform', { headers })).status, 200);
   await waitReady();
   passed('监控四组件重启后，指标历史、告警记录、Grafana 登录及原 Secret 保留，平台健康');
   report.installation = state.installation; report.images = monitorImages;
-  report.origin = monitorOrigin; report.receiptCount = afterRecords.length;
+  report.origin = consolePublicOrigin(state.publicOrigin) + '/admin/'; report.receiptCount = afterRecords.length;
   const rows = [];
   for (const key of monitorServices) rows.push(...await containers(monitorNames[key], state));
   report.footprint = JSON.parse('[' + (await docker(['stats', '--no-stream', '--format', '{{json .}}', ...rows.map(row => row.Id)])).split('\n').join(',') + ']')
@@ -142,6 +162,14 @@ await runWithKeepAlive(() => withLock(async () => {
   try { await verify(); }
   catch (error) { report.success = false; report.error = error.message; console.error('监控验收失败：' + error.message); process.exitCode = 1; }
   finally {
+    const identityCleaned = await cleanupMonitoringIdentity({
+      signOut: viewerCookie ? async () => {
+        assert.equal((await request('/api/auth/sign-out', { method: 'POST', headers: { cookie: viewerCookie, 'content-type': 'application/json' }, body: '{}' })).status, 200);
+        assert.equal((await request(grafanaPath + '/api/user', { headers: { cookie: viewerCookie } })).status, 401);
+      } : undefined,
+      revoke: viewerGrant ? () => docker(viewerGrant.args, { input: "UPDATE platform_role_bindings SET revoked_at=now() WHERE user_id=:'uid' AND granted_by='preprod-acceptance';\n" }) : undefined,
+    });
+    if (!identityCleaned) { report.success = false; report.error = 'monitoring_acceptance_identity_cleanup_failed'; process.exitCode = 1; }
     report.finishedAt = new Date().toISOString();
     const path = join(output, 'monitoring-acceptance-' + runId + '.json');
     await writeFile(path, JSON.stringify(report, null, 2) + '\n');
