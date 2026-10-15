@@ -199,7 +199,13 @@ export async function createPiRuntimeService(options) {
       if (rpc.dead) { void finish(task, 'unknown', 'runtime_lost'); return; }
       if (task.cancelReason || closing || response.destroyed) { task.cancelReason ||= closing ? 'shutdown' : 'disconnect'; void settle(task); return; }
       task.phase = 'running'; rpc.beginTask();
-      rpc.request('prompt', { message: value.prompt }).then(() => {
+      rpc.request('prompt', { message: value.prompt }).then(data => {
+        if (!data || !['started', 'queued', 'handled'].includes(data.disposition)) {
+          void finish(task, 'unknown', 'prompt_protocol');
+          ready = false; rpc.fail('prompt_protocol');
+          return;
+        }
+        if (data.disposition === 'handled') { void finish(task, 'failed', 'prompt_handled'); return; }
         task.accepted = true;
         if (task.settled && !task.finishing) void settle(task);
       }).catch(() => { if (!task.finishing) { ready = false; rpc.fail('prompt_failed'); void finish(task, 'unknown', 'prompt_failed'); } });

@@ -24,7 +24,8 @@ process.stdin.on('data', chunk => {
       const reply = () => send({ type: 'response', command: mode === 'wrong-command' ? 'other' : cmd.type, id: mode === 'wrong-id' ? 'wrong' : mode === 'missing-id' ? undefined : cmd.id, success: true, data: { model: { provider: arg('--provider'), id: mode === 'wrong-model' ? 'other' : arg('--model') }, sessionFile: mode === 'wrong-session' ? '/other' : sessionFile, sessionId, isStreaming: false } });
       if (mode === 'delayed') setTimeout(reply, 200); else reply();
     } else if (cmd.type === 'prompt') {
-      send({ type: 'response', id: cmd.id, command: 'prompt', success: true });
+      send({ type: 'response', id: cmd.id, command: 'prompt', success: true, data: { disposition: mode === 'handled-prompt' ? 'handled' : mode === 'queued-prompt' ? 'queued' : mode === 'bad-prompt-disposition' ? 'unknown' : 'started' } });
+      if (mode === 'handled-prompt') continue;
       if (mode === 'crash') { process.exit(1); }
       if (mode === 'overflow') { process.stdout.write('x'.repeat(300000) + '\n'); continue; }
       if (mode === 'hang' || mode === 'ignore-abort') continue;

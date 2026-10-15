@@ -15,7 +15,7 @@ pi-agent 与 deepseek-harness（dsh）作为**只读 git submodule** 挂载在�
 
 | 引擎 | 子模块路径 | 上游仓库 | 上游默认分支 | 当前 pin（2026-09-07） | 协议 | 说明 |
 | --- | --- | --- | --- | --- | --- | --- |
-| pi-agent | `upstreams/pi` | `earendil-works/pi` | `main` | `c1d4c801114545f47c440921d8b3e04aeb1e565d`（v0.0.2 之后 6036 提交） | MIT | npm workspace；`packages/` 下 `agent`（pi-agent-core）、`ai`（pi-ai）、`coding-agent`（CLI）、`server`、`session-backends`、`tui` 等 |
+| pi-agent | `upstreams/pi` | `earendil-works/pi` | `main` | `11f99114506ad2cc759cb389663edaf7546cbe8c`（coding-agent 1.1.0） | MIT | npm workspace；`packages/` 下 `agent`（pi-agent-core）、`ai`（pi-ai）、`coding-agent`（CLI）、`server`、`session-backends`、`tui` 等 |
 | deepseek-harness (dsh) | `upstreams/dsh` | `deepseek-ai/deepseek-harness` | `master` | `b0a7d2ce3b4c19d7452e364b2d7acbfa87e707ed`（dsh-v0.1.3-alpha.2 之后 106 提交） | MIT | pnpm workspace，插件化 Harness；`packages/` 下 `core`、`api`、`host`、`session`、`preset`、`bundle`、`client`/`web` 等 |
 
 维护约定：

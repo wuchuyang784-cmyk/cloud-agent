@@ -78,6 +78,25 @@ test('signed tasks preserve newlines, stream ordered events and authoritative us
   const stored = JSON.parse(await readFile(join(f.paths.state, 'tasks', p.taskId + '.json'), 'utf8'));
   assert.equal(stored.status, 'completed');
 });
+test('1.1.0 handled prompt disposition terminates without waiting for agent_settled', async t => {
+  const f = await fixture(t, 'handled-prompt'); await ready(f);
+  const e = await events(await request(f, payload(f)));
+  assert.equal(e.at(-1).type, 'task.failed');
+  assert.equal(e.at(-1).code, 'prompt_handled');
+  assert.equal((await fetch(f.base + '/readyz')).status, 200);
+});
+test('1.1.0 queued prompt disposition waits for agent_settled', async t => {
+  const f = await fixture(t, 'queued-prompt'); await ready(f);
+  const e = await events(await request(f, payload(f)));
+  assert.equal(e.at(-1).type, 'task.completed');
+});
+test('unknown 1.1.0 prompt disposition fails closed and disables readiness', async t => {
+  const f = await fixture(t, 'bad-prompt-disposition'); await ready(f);
+  const e = await events(await request(f, payload(f)));
+  assert.equal(e.at(-1).type, 'task.failed');
+  assert.equal(e.at(-1).code, 'prompt_protocol');
+  assert.equal((await fetch(f.base + '/readyz')).status, 503);
+});
 test('unsigned, wrong tuple, extra fields, encoded target and replay are refused', async t => {
   const f = await fixture(t); await ready(f);
   const p = payload(f);
@@ -152,6 +171,24 @@ test('malformed or future session files are refused and preserved on restart', a
     assert.equal(await readFile(file, 'utf8'), content);
   }
 });
+test('1.1.0 usage and context_edit session entries are accepted on restart', async t => {
+  const f = await fixture(t); await ready(f);
+  await events(await request(f, payload(f)));
+  await f.service.close();
+  const file = join(f.paths.state, 'sessions', f.config.sessionId + '.jsonl');
+  const records = (await readFile(file, 'utf8')).trim().split('\n').map(JSON.parse);
+  const user = records.find(entry => entry.type === 'message' && entry.message.role === 'user');
+  const parentId = records.at(-1).id;
+  records.push(
+    { type: 'usage', id: 'pi-usage-entry', parentId, timestamp: new Date().toISOString(), kind: 'cache_warm', provider: 'bairui-gateway', model: f.config.model, usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 } },
+    { type: 'context_edit', id: 'pi-context-edit-entry', parentId: 'pi-usage-entry', timestamp: new Date().toISOString(), targetId: user.id, replacement: null },
+  );
+  await writeFile(file, records.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+  const service = await createPiRuntimeService(f.options); const address = await service.start();
+  f.service = service; f.base = `http://127.0.0.1:${address.port}`; await ready(f);
+  const e = await events(await request(f, payload(f, { prompt: 'after-session-upgrade' })));
+  assert.equal(e.at(-1).type, 'task.completed');
+});
 test('output count limit cancels and does not emit completed', async t => {
   const f = await fixture(t, 'normal', { maxEvents: 3 }); await ready(f);
   assert.equal((await events(await request(f, payload(f)))).at(-1).type, 'task.failed');
@@ -215,6 +252,11 @@ test('pi child sees only whitelist env and fixed discovery-disable flags', async
   assert.equal(inspected.env.BAIRUI_FIXTURE_PRIVATE_SECRET, undefined);
   assert.equal(inspected.env.OPENAI_API_KEY, undefined);
   for (const flag of ['--no-extensions', '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-approve', '--offline']) assert.ok(inspected.args.includes(flag));
+  for (const [flag, value] of [['--mode', 'rpc'], ['--provider', f.config.provider], ['--model', f.config.model], ['--session-dir', join(f.paths.state, 'sessions')]]) {
+    const index = inspected.args.indexOf(flag);
+    assert.ok(index >= 0 && inspected.args[index + 1] === value, flag + '_argv_mismatch');
+  }
+  assert.equal(inspected.args[inspected.args.indexOf('--session') + 1], join(f.paths.state, 'sessions', f.config.sessionId + '.jsonl'));
   assert.equal(inspected.env.PI_CODING_AGENT_DIR, join(f.paths.state, 'trusted-config'));
 });
 test('secret symlink and malformed low-entropy secret are refused', async t => {

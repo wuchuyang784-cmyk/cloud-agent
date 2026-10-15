@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # F1 source-only release. The context is a validated git archive, not the repo.
 ARG BASE_IMAGE=docker.m.daocloud.io/library/node@sha256:2fe369e969550cde8e867afc3fe370b260140cab4a23d467074295b42163d553
 FROM ${BASE_IMAGE} AS pi-builder
@@ -12,7 +13,9 @@ RUN npm ci --ignore-scripts --no-audit --no-fund \
     && npm cache clean --force
 
 FROM ${BASE_IMAGE} AS pi-runtime
-RUN apt-get update \
+RUN sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\n' > /etc/apt/apt.conf.d/99bairui-timeouts \
+    && apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=pi-builder /opt/pi /opt/pi

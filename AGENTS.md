@@ -21,12 +21,12 @@
 
 ## 项目定位
 
-### F1：固定源码 pi Runtime（2026-10-11，独立验收通过，未部署）
+### F1：固定源码 pi Runtime（2026-10-13，1.1.0 独立复验通过，未部署）
 
 - 本批位于 `apps/platform-api/src/runtime/pi/production/`，独立固定配置/HMAC 请求、单任务有界 NDJSON、持久会话与任务 UUID 占位；旧 pi adapter/wrapper 保留，仅供 legacy 回归。不改 API/dev 启动链、E2 probe、平台能力开关或既有部署。
-- `upstreams/pi` 固定 `c1d4c801114545f47c440921d8b3e04aeb1e565d` / 0.85.1，拒绝源目录和 gitlink/锁文件漂移。模型目录 JSON 从同版本 pi-ai 发布 tarball 单独固定 SHA-512 提取（无 JS），保留上游目录校验与源码编译；记录数据发布提交区别，不将其冒充主源码内容。
+- `upstreams/pi` 固定 `11f99114506ad2cc759cb389663edaf7546cbe8c` / 1.1.0，锁文件 SHA-256 为 `7b597edc7527a36d9fba52f7e0fc9732447065fd96e4e6abc976cdcd14676b6b`，拒绝源目录和 gitlink/锁文件漂移。模型目录 JSON 从同版本 pi-ai 发布 tarball 单独固定 SHA-512 提取 43 个文件（无 JS），保留上游目录校验与源码编译；wrapper 已复核 1.1.0 的 RPC disposition、session v3 条目、启动参数和 abort/timeout 协议。
 - 独立命令 `npm run pi:source:check`、`pi:build`、`test:pi`、`test:pi:live`；产物在忽略的 `output/pi-runtime/`。真实 pi + HTTPS/SSE fixture 验收不使用用户 Key/付费模型，按归属清理临时容器/卷/网络，不操作 Linux 服务器、业务库或常驻预发。
-- F1 专项 48 通过；后端全量 326 通过/9 数据库专项跳过/0 失败；独立规格与质量审查完成。实际 amd64 镜像版本 `a9fbc2fa0e66252fcb35`，真实容器报告 `output/pi-runtime/acceptance/2026-10-11T15-01-34-473Z.json` 的 16 项检查均通过，含会话恢复、真实工具、超时/取消、输出超限、临时资源清理与原容器保留。未验收 arm64 或真实付费 Provider。
+- F1 专项 `test:pi` 53 项通过，源码固定检查通过；实际 amd64 镜像为 `bairui/pi-runtime-f1:611ce4ff34317c36d8ef`，image ID `sha256:e696b993afc8ccecea5e8236e8139e45f485175bec078db7bfb61ac74504a903`，构建报告为 `output/pi-runtime/builds/611ce4ff34317c36d8ef.json`。真实容器报告 `output/pi-runtime/acceptance/2026-10-13T02-03-27-348Z.json` 的 16 项检查均通过，含会话恢复、真实工具/流式输出、超时/取消、RPC 超限、临时资源清理与原容器保留。未验收 arm64 或真实付费 Provider。
 - F1 不是用户 Agent 已上线或多租户沙箱完成：工具与 wrapper/state 同 UID，F2 凭据保险库/模型网关与 F3 控制 Secret、网络、存储、进程树隔离必须后续交付；不允许据此开放真实用户创建/执行。服务器规格主要影响 F3/F4/F7，非本批前置条件。运行契约与验证记录见 `docs/50-f1-pi-runtime.md`。
 
 ### 业务管理端 Grafana（2026-10-11，本机已部署）

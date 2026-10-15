@@ -4,7 +4,7 @@
 
 ## 目标与边界
 
-使用 `upstreams/pi` 固定提交 `c1d4c801114545f47c440921d8b3e04aeb1e565d`（coding-agent 0.85.1）的源码和锁文件构建镜像。新增独立 `runtime/pi/production/` wrapper，不复用 legacy 的可选认证、环境共享 Key、每任务重置、字符数 token 兜底和无界输入/队列。保留 legacy 回归文件；不改平台能力开关、数据库、E2 probe 或现有部署。
+使用 `upstreams/pi` 固定提交 `11f99114506ad2cc759cb389663edaf7546cbe8c`（coding-agent 1.1.0）的源码和锁文件构建镜像。新增独立 `runtime/pi/production/` wrapper，不复用 legacy 的可选认证、环境共享 Key、每任务重置、字符数 token 兜底和无界输入/队列。保留 legacy 回归文件；不改平台能力开关、数据库、E2 probe 或现有部署。
 
 F1 的 HTTP 为未来 Runtime Gateway 的内部协议，不面向用户浏览器。F2 负责用户凭据与模型网关；F3 负责 Linux/gVisor/网络/存储隔离；F4 负责用户授权、配额与生命周期；F5 负责页面。F1 仅在独立临时资源中使用真实 pi + 本机测试模型协议服务验收，不使用用户 Key 或付费模型。
 
@@ -13,7 +13,7 @@ F1 的 HTTP 为未来 Runtime Gateway 的内部协议，不面向用户浏览器
 - 先检查 gitlink、上游 HEAD、工作树干净、版本及锁文件哈希；不更新子模块或上游源码。
 - 从固定提交 `git archive` 生成有界临时构建上下文，只包含上游已提交源码、F1 wrapper 和构建定义，不上传 `.env`、业务数据库、output 或 Git 私有配置。
 - 固定基础镜像 digest，`npm ci --ignore-scripts`，显式上游离线构建；不安装发布版 pi 替代源码、不执行上游 prepare/publish。
-- 上游 Git 排除了必需模型目录 JSON。仅从同版本 `pi-ai@0.85.1` 发布 tarball 提取目录 JSON（不是可执行代码），锁定 SHA-512、逐文件 SHA-256，并保留上游 `check:model-data` 校验；记录该数据发布提交与主源码提交的区别。不能在每次构建时重新抓取变化中的模型列表。
+- 上游 Git 排除了必需模型目录 JSON。仅从同版本 `pi-ai@1.1.0` 发布 tarball 提取 43 个目录 JSON（不是可执行代码），锁定 SHA-512、逐文件 SHA-256，并保留上游 `check:model-data` 校验；记录该数据发布包与主源码提交的区别。不能在每次构建时重新抓取变化中的模型列表。
 - 保存源码提交、锁文件/构建定义/wrapper 哈希、实际镜像 ID 和摘要构建证据。产物使用独立 F1 标签，不覆盖 legacy/预发镜像；实际部署按 digest。
 - 运行非 root，根文件系统可只读；仅工作空间、Agent 状态和有限 tmp 可写，无 Docker socket、宿主路径、原始 Provider Key 或平台数据库凭据。
 
