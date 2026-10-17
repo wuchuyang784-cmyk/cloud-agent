@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename, resolve } from 'node:path';
 import { announcementMonitoringAssets } from './announcement-monitoring-config.mjs';
@@ -31,6 +31,7 @@ try {
   directory = await mkdtemp(join(tmpdir(), 'bairui-announcement-rules-'));
   await writeFile(join(directory, 'rules.json'), JSON.stringify(asset.rules));
   await writeFile(join(directory, 'tests.json'), JSON.stringify({ rule_files: ['/rules/rules.json'], evaluation_interval: '15s', tests }));
+  await chmod(directory, 0o755);
   const context = JSON.parse((await exec('docker', ['context', 'inspect'], { windowsHide: true })).stdout)[0];
   assert.match(context?.Endpoints?.docker?.Host ?? '', /^(npipe:\/\/|unix:\/\/)/); assert.equal(process.env.DOCKER_HOST, undefined);
   const result = await exec('docker', ['run', '--rm', '--pull=never', '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges:true',
