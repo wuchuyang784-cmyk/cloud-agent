@@ -395,14 +395,11 @@ export interface FavoriteItem {
   createdAt?: string;
 }
 
-export interface BackendNotification {
-  id: string;
-  type: 'system' | 'billing' | 'agent' | 'resource';
-  title: string;
-  body: string;
-  isRead: boolean;
-  readAt?: string | null;
-  createdAt?: string;
+export type BackendNotification = import('./notification-state').NotificationItem;
+
+// Keep the existing API base, credential and session-expiry handling for the isolated notification model.
+export function notificationRequest(path: string, init: RequestInit): Promise<unknown> {
+  return request(path, init);
 }
 
 export interface UserSettings {

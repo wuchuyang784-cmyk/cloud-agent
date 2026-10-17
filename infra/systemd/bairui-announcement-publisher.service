@@ -1,0 +1,29 @@
+# Opt-in Linux template only. E rollout provisions its dedicated login, token and explicit environment file.
+[Unit]
+Description=BaiRui announcement publisher
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=bairui-announcements
+Group=bairui-announcements
+WorkingDirectory=/opt/cloud-agent
+EnvironmentFile=/etc/bairui/announcements-publisher.env
+ExecStart=/usr/bin/node /opt/cloud-agent/apps/platform-api/src/announcements/publisher-entry.mjs
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

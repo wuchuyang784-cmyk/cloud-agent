@@ -1,5 +1,6 @@
 import { readAdmin } from './store.mjs';
 import { handleGovernance } from './governance.mjs';
+import { handleAnnouncementAdmin } from '../announcements/admin-routes.mjs';
 
 const statuses = new Set(['uninitialized', 'provisioning', 'starting', 'ready', 'degraded', 'offline', 'failed', 'stopped']);
 const resources = new Set(['me', 'users', 'agents']);
@@ -14,6 +15,9 @@ export async function handleAdmin({ request, response, url, principal, store, en
     // Authorization never comes from an organization role or a browser-supplied actor.
     const access = await readAdmin(store, principal.userId, 'me');
     if (!access) return fail(403, 'platform_role_required');
+    if (url.pathname === '/api/admin/announcements' || url.pathname.startsWith('/api/admin/announcements/')) {
+      return await handleAnnouncementAdmin({ request, response, url, actor: principal.userId, access, store, env, sendJson, fail });
+    }
     if (url.pathname.startsWith('/api/admin/grafana/')) {
       if (!access.permissions?.includes('monitoring:read')) return fail(403, 'platform_role_required');
       return await grafana.handle({ request, response, url, principal, readJson, fail });

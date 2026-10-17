@@ -14,6 +14,7 @@ import { handleAdmin } from './admin/routes.mjs';
 import { createAdminMonitoring } from './admin/monitoring.mjs';
 import { createGrafanaProxy } from './admin/grafana-proxy.mjs';
 import { handleClientMonitoring } from './monitoring/client-routes.mjs';
+import { handleNotificationCenter } from './announcements/user-routes.mjs';
 import { accountAccess, GovernanceError } from './admin/governance.mjs';
 
 function sendJson(response, status, body, headers = {}) {
@@ -171,7 +172,8 @@ export function createApp(options = {}) {
     try {
       const url = new URL(request.url, 'http://platform.local');
       const path = url.pathname;
-      if (path.startsWith('/api/admin/') || path.startsWith('/api/user/monitoring/')) response.setHeader('cache-control', 'no-store');
+      if (path.startsWith('/api/admin/') || path.startsWith('/api/user/monitoring/')
+        || /^\/api\/user\/(?:announcements|notifications)(?:\/|$)/.test(path)) response.setHeader('cache-control', 'no-store');
       if (request.method === 'GET' && ['/livez', '/readyz', '/healthz'].includes(path)) {
         response.setHeader('cache-control', 'no-store');
         if (path === '/livez') return sendJson(response, 200, { status: 'ok' });
@@ -254,6 +256,10 @@ export function createApp(options = {}) {
           enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId, env, readJson, monitoring: adminMonitoring, grafana });
       }
       if (!principal) return sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
+
+      if (/^\/api\/user\/(?:announcements|notifications)(?:\/|$)/.test(path)) {
+        return await handleNotificationCenter({ request, response, url, scope, store, env, strictOrigin: auth.provider === 'better-auth', sendJson, sendError, requestId });
+      }
 
       if (path.startsWith('/api/user/monitoring/')) {
         return await handleClientMonitoring({ request, response, url, scope, store, sendJson, sendError, requestId });
@@ -522,24 +528,6 @@ export function createApp(options = {}) {
         response.writeHead(204);
         response.end();
         return;
-      }
-
-      // ---------- 站内通知 ----------
-      if (request.method === 'GET' && path === '/api/user/notifications') {
-        const result = await store.listNotifications(scope);
-        return sendJson(response, 200, { notifications: result.notifications, unreadCount: result.unreadCount });
-      }
-
-      if (request.method === 'POST' && path === '/api/user/notifications/read-all') {
-        const updated = await store.markNotificationsRead(scope);
-        return sendJson(response, 200, { ok: true, updated });
-      }
-
-      const notificationMatch = path.match(/^\/api\/user\/notifications\/([^/]+)$/);
-      if (request.method === 'PATCH' && notificationMatch) {
-        const updated = await store.markNotificationsRead(scope, notificationMatch[1]);
-        if (updated === 0) return sendError(response, 404, 'notification_not_found', 'Notification not found', requestId);
-        return sendJson(response, 200, { ok: true, updated });
       }
 
       // ---------- 用户设置 ----------

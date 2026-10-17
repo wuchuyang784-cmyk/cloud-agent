@@ -1,4 +1,6 @@
-export type View = 'overview' | 'users' | 'agents' | 'monitoring' | 'alerts';
+import { AnnouncementSession } from './announcements.ts';
+
+export type View = 'overview' | 'users' | 'agents' | 'monitoring' | 'alerts' | 'announcements';
 export type Query = { view: View; q?: string; after?: string; limit?: string; ownerUserId?: string; status?: string };
 export type Row = { id: string; email?: string; displayName?: string | null; createdAt?: string | null;
   authLinked?: boolean; name?: string; ownerUserId?: string; ownerEmail?: string; status?: string; engine?: string; updatedAt?: string; account?: AccountState };
@@ -19,6 +21,7 @@ class HttpError extends Error {
 }
 
 export class AdminSession {
+  readonly announcements: AnnouncementSession;
   private transport: Transport;
   private state: Snapshot = { phase: 'loading', me: null, items: [], nextCursor: null, error: '', updatedAt: null, governance: null,
     monitoring: { phase: 'idle', data: null, error: '', updatedAt: null } };
@@ -29,7 +32,11 @@ export class AdminSession {
   private locked = false;
   private currentView: View = 'overview';
   private timeoutMs: number;
-  constructor(transport: Transport = (path, init) => fetch(path, init), timeoutMs = 15000) { this.transport = transport; this.timeoutMs = timeoutMs; }
+  constructor(transport: Transport = (path, init) => fetch(path, init), timeoutMs = 15000) {
+    this.transport = transport; this.timeoutMs = timeoutMs;
+    this.announcements = new AnnouncementSession((path, init) => this.transport(path, init), { timeoutMs,
+      onDenied: status => this.fail(new HttpError(status), this.generation) });
+  }
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private publish(next: Partial<Snapshot>) {
@@ -37,6 +44,7 @@ export class AdminSession {
     this.listeners.forEach(listener => listener());
   }
   private begin(phase: Phase) {
+    this.announcements.reset();
     this.abort.abort();
     this.abort = new AbortController();
     const generation = ++this.generation;
@@ -45,7 +53,7 @@ export class AdminSession {
       monitoring: { phase: ['overview', 'monitoring', 'alerts'].includes(this.currentView) ? 'loading' : 'idle', data: null, error: '', updatedAt: null } });
     return { generation, signal: this.abort.signal };
   }
-  cancel = () => { if (!this.locked) { this.generation++; this.abort.abort(); } };
+  cancel = () => { if (!this.locked) { this.generation++; this.abort.abort(); this.announcements.reset(); } };
   private async json(path: string, signal: AbortSignal, body?: object) {
     const timeout = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -66,6 +74,7 @@ export class AdminSession {
     this.generation++;
     this.detailGeneration++;
     this.abort.abort();
+    this.announcements.reset();
     const code = error instanceof HttpError ? error.status : 0;
     const phase = code === 401 ? 'login' : code === 403 ? 'denied' : signingIn ? 'login' : 'error';
     this.publish({ phase, me: null, items: [], nextCursor: null, updatedAt: null, governance: null, monitoring: { phase: 'idle', data: null, error: '', updatedAt: null },
@@ -77,6 +86,11 @@ export class AdminSession {
     const permission = query.view === 'overview' || query.view === 'monitoring' ? 'monitoring:read' : query.view + ':read';
     if (!['platform_viewer', 'platform_operator', 'platform_admin'].includes(me.role)
       || !me.permissions?.includes(permission) || !me.user?.id) throw new HttpError(403);
+    if (query.view === 'announcements') {
+      this.publish({ phase: 'ready', me, items: [], nextCursor: null, error: '', updatedAt: Date.now() });
+      await this.announcements.activate(me);
+      return;
+    }
     if (query.view === 'overview' || query.view === 'monitoring' || query.view === 'alerts') {
       try {
         const data = await this.json('/api/admin/monitoring/' + (query.view === 'alerts' ? 'alerts' : 'overview'), signal);

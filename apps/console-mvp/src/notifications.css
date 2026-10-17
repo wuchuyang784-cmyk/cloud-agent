@@ -1,0 +1,38 @@
+.nc-help { color: var(--text-secondary, #687382); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.nc-feedback { color: #8a4b00; background: #fff8ed; padding: 12px; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.nc-feedback p { margin: 0 0 6px; }
+.nc-success { color: #008858; font-size: 12px; }
+.nc-unknown { background: #86909c !important; }
+.nc-pop { max-height: calc(100dvh - 80px); display: flex; flex-direction: column; }
+.nc-pop .notice-pop-list { min-height: 0; }
+.nc-pop .notice-item { min-width: 0; }
+.nc-pop-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-top: 1px solid #edf0f3; color: #687382; font-size: 12px; }
+.nc-row-tags { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: #687382; margin-bottom: 5px; }
+.nc-row-tags > span { background: #f2f4f7; border-radius: 3px; padding: 2px 5px; }
+.nc-row-tags > .nc-important { background: #fff1e9; color: #a14300; }
+.nc-row .notice-main p { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nc-center { min-width: 0; max-width: 1100px; margin: 0 auto; }
+.nc-center .page-heading { flex-wrap: wrap; gap: 12px; }
+.nc-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 12px 0; }
+.nc-toolbar label { display: flex; gap: 8px; align-items: center; color: #687382; font-size: 12px; }
+.nc-toolbar select, .nc-pagination select { max-width: 100%; padding: 6px; border: 1px solid #dce0e6; border-radius: 4px; background: white; }
+.nc-count { margin-left: auto; color: #687382; font-size: 12px; }
+.nc-card { border: 1px solid #e5e6eb; border-radius: 6px; background: #fff; padding: 12px; min-width: 0; }
+.nc-card > .nc-help { padding: 20px; }
+.nc-card .nc-row { border-bottom: 1px solid #edf0f3; border-radius: 0; padding: 16px 8px; }
+.nc-card .notice-main strong { white-space: normal; overflow-wrap: anywhere; }
+.nc-pagination { display: flex; justify-content: space-between; flex-wrap: wrap; align-items: center; gap: 12px; color: #687382; font-size: 12px; }
+.nc-pagination > div { display: flex; align-items: center; gap: 10px; }
+.nc-pagination label { white-space: nowrap; }
+.nc-dialog { box-sizing: border-box; margin: auto; width: 720px; max-width: calc(100vw - 24px); max-height: calc(100dvh - 28px); padding: 24px; overflow: auto; border: 1px solid #dce0e6; border-radius: 6px; color: #252b36; }
+.nc-dialog::backdrop { background: rgb(20 25 35 / 35%); }
+.nc-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.nc-dialog h2 { margin: 0; font-size: 18px; }
+.nc-dialog h3 { font-size: 20px; line-height: 1.6; overflow-wrap: anywhere; }
+.nc-detail-body { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.9; font-size: 14px; }
+.nc-dialog dl { border-top: 1px solid #edf0f3; margin: 24px 0 12px; padding-top: 16px; font-size: 12px; color: #687382; }
+.nc-dialog dl > div { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.nc-dialog dt { min-width: 60px; }
+.nc-dialog dd { margin: 0; overflow-wrap: anywhere; }
+.nc-recovery { position: fixed; z-index: 70; top: 66px; right: 16px; width: min(360px, calc(100vw - 32px)); border: 1px solid #efd5a7; border-radius: 6px; background: #fff8ed; box-shadow: 0 6px 20px rgb(31 35 41 / 12%); }
+@media (max-width: 520px) { .nc-dialog { padding: 16px; } .nc-center .heading-actions { flex-wrap: wrap; } .nc-count { margin-left: 0; } .nc-toolbar { gap: 12px; } .nc-center .page-heading h1 { font-size: 22px; } }

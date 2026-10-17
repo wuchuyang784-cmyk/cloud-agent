@@ -2,9 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('unified console exposes the approved five-item structure and fixed read-only Grafana source', async () => {
+test('unified console preserves five original items, adds announcements and keeps fixed read-only Grafana source', async () => {
   const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  for (const label of ['平台概览', '用户账号', 'Agent 服务', '运行监控', '告警']) assert.ok(app.includes(label), label);
+  for (const label of ['平台概览', '用户账号', 'Agent 服务', '运行监控', '告警', '公告管理']) assert.ok(app.includes(label), label);
+  const editor = await readFile(new URL('../src/AnnouncementEditor.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(editor, /dangerouslySetInnerHTML|localStorage|sessionStorage/);
+  assert.match(editor, /确认发布/); assert.match(editor, /撤回原因/);
+  assert.match(editor, /\{draft && <button type="button" onClick=\{\(\) => setPreview/);
   const monitor = await readFile(new URL('../src/MonitoringView.tsx', import.meta.url), 'utf8');
   const targets = await readFile(new URL('../src/monitoring-target.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(targets, /localhost:9443/);

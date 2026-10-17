@@ -6,7 +6,8 @@ import { stripTypeScriptTypes } from 'node:module';
 const source = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const marker = 'const refresh = useCallback(';
 const start = source.indexOf(marker);
-const end = source.indexOf('\n  }, []);', start);
+const dependencyList = /\n  }, \[[^\]]*\]\);/.exec(source.slice(start));
+const end = dependencyList ? start + dependencyList.index : -1;
 assert.ok(start >= 0 && end > start, 'App refresh callback must exist');
 // Exercise the actual callback with controlled transports, without duplicating its logic.
 const callback = source.slice(start + marker.length, end) + '\n}';
@@ -24,12 +25,12 @@ function harness(capabilityRequests) {
   const dependencies = {
     sessionGeneration: { current: 0 }, refreshGeneration: { current: 0 }, CLOSED_CAPABILITIES: closed,
     fetchCapabilities: () => capabilityRequests.shift()(),
+    notices: { refresh: async () => {} },
   };
   for (const name of ['Agents', 'Resources', 'Usage', 'Favorites', 'Settings', 'Account', 'Transactions', 'Filings']) {
     dependencies['fetch' + name] = async () => [];
   }
-  dependencies.fetchNotifications = async () => ({ notifications: [], unreadCount: 0 });
-  for (const name of ['Capabilities', 'Refreshing', 'Agents', 'Resources', 'Usage', 'SelectedId', 'Favorites', 'Notifications', 'Unread', 'Settings', 'Account', 'Transactions', 'Filings', 'Error']) {
+  for (const name of ['Capabilities', 'Refreshing', 'Agents', 'Resources', 'Usage', 'SelectedId', 'Favorites', 'Settings', 'Account', 'Transactions', 'Filings', 'Error']) {
     const key = name[0].toLowerCase() + name.slice(1);
     dependencies['set' + name] = value => { state[key] = typeof value === 'function' ? value(state[key]) : value; };
   }
@@ -74,4 +75,12 @@ test('a response from a cleared session cannot repopulate data or capabilities',
   older.resolve(legacy);
   await pending;
   assert.deepEqual(h.state, before);
+});
+
+test('notification refresh is independent and cannot hold or enable platform capabilities', async () => {
+  const notification = deferred();
+  const h = harness([async () => closed]); let requests = 0;
+  h.dependencies.notices.refresh = () => { requests++; return notification.promise; };
+  await h.refresh(); assert.equal(requests, 1); assert.deepEqual(h.state.capabilities, closed);
+  notification.resolve(); assert.deepEqual(h.state.capabilities, closed);
 });

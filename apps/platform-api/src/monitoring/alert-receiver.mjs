@@ -10,7 +10,8 @@ const MAX_FILES = 3;
 const ALERT_NAMES = new Set(['ApiReplicaMissing', 'DatabaseUnavailable', 'ApiErrorRateHigh',
   'ApiLatencyHigh', 'DatabasePoolWaiting', 'MonitoringTargetDown', 'AlertDeliveryFailed',
   'RuntimeControllerUnavailable', 'RuntimeControllerCycleFailed', 'RuntimeStopOverdue',
-  'RuntimeCommandDead', 'RuntimeObservationUnavailable']);
+  'RuntimeCommandDead', 'RuntimeObservationUnavailable', 'AnnouncementPublisherUnavailable', 'AnnouncementPublisherCycleFailed',
+  'AnnouncementPublishDelayed', 'AnnouncementPublishBlocked', 'AnnouncementPublishFailed']);
 const SEVERITIES = new Set(['info', 'warning', 'critical']);
 const STATUSES = new Set(['firing', 'resolved']);
 const MONITOR_INSTANCES = new Set(['localhost:9090', 'bairui-monitor_alertmanager:9093', 'bairui-monitor_grafana:3000']);

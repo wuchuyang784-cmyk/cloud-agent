@@ -1,12 +1,15 @@
-import { Activity, Archive, BarChart3, Bell, BookOpen, Bot, CheckCircle2, CircleAlert, Clock3, FileCheck2, LayoutDashboard, LibraryBig, LoaderCircle, LogOut, MessageSquare, Plus, Puzzle, RefreshCw, Search, Send, Settings, Settings2, ShieldCheck, Sparkles, Star, Terminal, Trash2, Users, Wallet, Wrench, X, Zap } from 'lucide-react';
+import { Activity, Archive, BarChart3, BookOpen, Bot, CheckCircle2, CircleAlert, Clock3, FileCheck2, LayoutDashboard, LibraryBig, LoaderCircle, LogOut, MessageSquare, Plus, Puzzle, RefreshCw, Search, Send, Settings, Settings2, ShieldCheck, Sparkles, Star, Terminal, Trash2, Users, Wallet, Wrench, X, Zap } from 'lucide-react';
 import type { FormEvent, ReactNode } from 'react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { CLOSED_CAPABILITIES, fetchCapabilities, type PlatformCapabilities, addFavorite, createAgent, createFiling, createResource, createSession, deleteResource, fetchAccount, fetchAgents, fetchCurrentUser, fetchFavorites, fetchFilings, fetchHealth, fetchNotifications, fetchResource, fetchResources, fetchSettings, fetchTransactions, fetchUsage, logoutAccount, markNotificationRead, readAllNotifications, rechargeAccount, removeFavorite, streamChat, updateResource, updateSettings, type AccountInfo, type BackendAgent, type BackendNotification, type BackendResource, type BillingTransaction, type FavoriteItem, type FilingRecord, type ResourceDetail, type ResourceKind, type Session, type UsagePayload, type User, type UserSettings } from './api';
+import { CLOSED_CAPABILITIES, fetchCapabilities, type PlatformCapabilities, addFavorite, createAgent, createFiling, createResource, createSession, deleteResource, fetchAccount, fetchAgents, fetchCurrentUser, fetchFavorites, fetchFilings, fetchHealth, fetchResource, fetchResources, fetchSettings, fetchTransactions, fetchUsage, logoutAccount, rechargeAccount, removeFavorite, streamChat, updateResource, updateSettings, type AccountInfo, type BackendAgent, type BackendResource, type BillingTransaction, type FavoriteItem, type FilingRecord, type ResourceDetail, type ResourceKind, type Session, type UsagePayload, type User, type UserSettings } from './api';
 import { LoginPage } from './LoginPage';
 import { ClientMonitoring } from './ClientMonitoring';
+import { notificationRequest } from './api';
+import { NotificationSession, watchNotifications } from './notification-state';
+import { NotificationBell, NotificationCenter, NotificationPopover, NotificationDetail } from './NotificationCenter';
 
 type LibraryPanel = 'library' | 'library-knowledge_base' | 'library-skill' | 'library-tool' | 'library-plugin';
-type Panel = 'overview' | LibraryPanel | 'agents' | 'chat' | 'conversations' | 'deploy' | 'control' | 'approvals' | 'observability' | 'favorites' | 'billing' | 'filing';
+type Panel = 'overview' | LibraryPanel | 'agents' | 'chat' | 'conversations' | 'deploy' | 'control' | 'approvals' | 'observability' | 'favorites' | 'billing' | 'filing' | 'notifications';
 type AgentTab = 'templates' | 'projects' | 'runs' | 'settings';
 type ResourceTab = 'all' | ResourceKind;
 type ChatMessage = { id: string; role: 'user' | 'assistant' | 'system'; content: string; time: string };
@@ -58,8 +61,9 @@ export function App() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
-  const [notifications, setNotifications] = useState<BackendNotification[]>([]);
-  const [unread, setUnread] = useState(0);
+  const [notices] = useState(() => new NotificationSession(notificationRequest, {
+    onDenied: (status) => window.dispatchEvent(new Event(status === 401 ? 'bairui:session-expired' : 'bairui:account-refresh')),
+  }));
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [transactions, setTransactions] = useState<BillingTransaction[]>([]);
@@ -69,17 +73,26 @@ export function App() {
   const [filingOpen, setFilingOpen] = useState(false);
   const sessionGeneration = useRef(0);
   const refreshGeneration = useRef(0);
+  const logoutPending = useRef(false);
   const clearUserSession = useCallback(() => {
+    notices.reset();
+    logoutPending.current = false;
     sessionGeneration.current++;
     refreshGeneration.current++;
     setCapabilities(CLOSED_CAPABILITIES);
     setUser(null); setAgents([]); setResources([]); setUsage(null); setSelectedId(null);
     setSession(null); setMessages([]); setText(''); setPanel('overview');
-    setFavorites([]); setNotifications([]); setUnread(0); setSettings(null);
+    setFavorites([]); setSettings(null);
     setAccount(null); setTransactions([]); setFilings([]); setResourceDetail(null);
     setModal(false); setResourceModal(false); setNoticeOpen(false); setSettingsOpen(false);
     setFilingOpen(false); setRefreshing(false); setError(null);
-  }, []);
+  }, [notices]);
+  useEffect(() => {
+    if (!user) return;
+    void notices.activate(user);
+    const stop = watchNotifications(notices, window, document);
+    return () => { stop(); notices.reset(); };
+  }, [notices, user?.userId, user?.organizationId, user?.accountStatus]);
   useEffect(() => {
     window.addEventListener('bairui:session-expired', clearUserSession);
     return () => window.removeEventListener('bairui:session-expired', clearUserSession);
@@ -90,11 +103,13 @@ export function App() {
     const controller = new AbortController();
     const generation = sessionGeneration.current;
     const check = async () => {
-      if (pending || document.visibilityState !== 'visible') return;
+      if (pending || logoutPending.current || document.visibilityState !== 'visible') return;
       pending = true;
       try {
         const next = await fetchCurrentUser(AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
-        if (!cancelled && generation === sessionGeneration.current && next?.userId === user.userId) setUser(next);
+        if (!cancelled && !logoutPending.current && generation === sessionGeneration.current && next?.userId === user.userId) {
+          setUser(next); void notices.activate(next);
+        }
       } catch { /* The server continues to enforce access while polling is unavailable. */ }
       finally { pending = false; }
     };
@@ -111,6 +126,7 @@ export function App() {
     return { knowledge_base: byKind('knowledge_base'), skill: byKind('skill'), tool: byKind('tool'), plugin: byKind('plugin') };
   }, [resources]);
   const refresh = useCallback(async () => {
+    void notices.refresh();
     const generation = sessionGeneration.current;
     const refreshId = ++refreshGeneration.current;
     const isCurrent = () => generation === sessionGeneration.current && refreshId === refreshGeneration.current;
@@ -121,9 +137,8 @@ export function App() {
       if (!isCurrent()) return;
       setAgents(nextAgents); setResources(nextResources); setUsage(nextUsage);
       setSelectedId((id) => id && nextAgents.some((item) => item.id === id) ? id : nextAgents[0]?.id ?? null);
-      const [nextFavorites, nextNotices, nextSettings, nextAccount, nextTransactions, nextFilings] = await Promise.all([
+      const [nextFavorites, nextSettings, nextAccount, nextTransactions, nextFilings] = await Promise.all([
         fetchFavorites().catch(() => []),
-        fetchNotifications().catch(() => ({ notifications: [], unreadCount: 0 })),
         fetchSettings().catch(() => null),
         fetchAccount().catch(() => null),
         fetchTransactions().catch(() => []),
@@ -131,12 +146,12 @@ export function App() {
       ]);
       if (!isCurrent()) return;
       setCapabilities(nextCapabilities);
-      setFavorites(nextFavorites); setNotifications(nextNotices.notifications); setUnread(nextNotices.unreadCount);
+      setFavorites(nextFavorites);
       setSettings(nextSettings); setAccount(nextAccount); setTransactions(nextTransactions); setFilings(nextFilings);
       setError(null);
     } catch (caught) { if (isCurrent()) setError(caught instanceof Error ? caught.message : '加载控制台数据失败'); }
     finally { if (isCurrent()) setRefreshing(false); }
-  }, []);
+  }, [notices]);
   useEffect(() => {
     let cancelled = false;
     void (async () => { try { const current = await fetchCurrentUser(); if (!cancelled) { setUser(current); if (current) await refresh(); } } catch (caught) { if (!cancelled) setError(caught instanceof Error ? caught.message : '无法连接平台 API'); } finally { if (!cancelled) setLoading(false); } })();
@@ -146,8 +161,18 @@ export function App() {
   useEffect(() => { if (!capabilities.agentExecution || !agents.some((item) => item.status === 'provisioning')) return undefined; const timer = window.setInterval(() => void refresh(), 2000); return () => window.clearInterval(timer); }, [agents, refresh, capabilities.agentExecution]);
   const handleAuthenticated = useCallback(async (next: User) => { clearUserSession(); setUser(next); await refresh(); }, [refresh, clearUserSession]);
   async function handleLogout() {
-    try { await logoutAccount(); clearUserSession(); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : '退出失败，请重试'); }
+    notices.reset(); setNoticeOpen(false);
+    if (logoutPending.current) return;
+    logoutPending.current = true;
+    const generation = sessionGeneration.current;
+    try { await logoutAccount(); if (generation === sessionGeneration.current) clearUserSession(); }
+    catch { if (generation === sessionGeneration.current) setError('退出未确认，通知已清空；正在重新验证登录状态，可重试退出。'); }
+    finally {
+      if (generation === sessionGeneration.current) {
+        logoutPending.current = false;
+        window.dispatchEvent(new Event('bairui:account-refresh'));
+      }
+    }
   }
   async function submitAgent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!capabilities.agentLifecycle) return; const name = agentName.trim(); if (!name) return;
@@ -203,12 +228,6 @@ export function App() {
     if (existing) return removeOneFavorite(existing);
     try { const favorite = await addFavorite('resource', resource.id); setFavorites((list) => [favorite, ...list.filter((item) => item.id !== favorite.id)]); } catch (caught) { setError(caught instanceof Error ? caught.message : '收藏失败'); }
   }
-  async function markAllNotificationsRead() {
-    try { await readAllNotifications(); setNotifications((list) => list.map((item) => ({ ...item, isRead: true }))); setUnread(0); } catch (caught) { setError(caught instanceof Error ? caught.message : '操作失败'); }
-  }
-  async function markOneNotificationRead(id: string) {
-    try { await markNotificationRead(id); setNotifications((list) => list.map((item) => (item.id === id ? { ...item, isRead: true } : item))); setUnread((count) => Math.max(0, count - 1)); } catch { /* 忽略单条已读失败 */ }
-  }
   async function saveSettings(displayName: string) {
     const next = await updateSettings({ displayName: displayName.trim() || null });
     setSettings(next); setSettingsOpen(false); setError(null);
@@ -217,12 +236,12 @@ export function App() {
     if (!capabilities.simulatedRecharge) throw new Error(capabilityNotice);
     const result = await rechargeAccount(amountCents);
     setAccount(result.account); setTransactions((list) => [result.transaction, ...list]);
-    try { const notices = await fetchNotifications(); setNotifications(notices.notifications); setUnread(notices.unreadCount); } catch { /* 忽略 */ }
+    void notices.refresh();
   }
   async function submitFiling(input: { domain: string; subjectName: string; subjectType: 'enterprise' | 'individual'; icpNumber?: string }) {
     const filing = await createFiling(input);
     setFilings((list) => [filing, ...list]); setFilingOpen(false);
-    try { const notices = await fetchNotifications(); setNotifications(notices.notifications); setUnread(notices.unreadCount); } catch { /* 忽略 */ }
+    void notices.refresh();
   }
   if (loading) return <div className="console-loading"><LoaderCircle className="spin" /><span>正在连接 BaiRui 控制台...</span></div>;
   if (!user) return <LoginPage onAuthenticated={(next) => void handleAuthenticated(next)} />;
@@ -243,7 +262,7 @@ export function App() {
           <button type="button" className={'console-topbar-link' + (panel === 'billing' ? ' active' : '')} title="费用" onClick={() => setPanel('billing')}>费用</button>
         </nav>
         <div className="console-top-actions">
-          <button className={'icon-button' + (noticeOpen ? ' active' : '')} title="通知" aria-label="通知" onClick={() => setNoticeOpen((open) => !open)}><Bell />{unread > 0 ? <span className="bell-badge">{unread > 99 ? '99+' : unread}</span> : <i />}</button>
+          <NotificationBell model={notices} open={noticeOpen} onToggle={() => { if (!noticeOpen) void notices.filter({ source: 'all', read: 'all', history: false }); setNoticeOpen(open => !open); }} />
           <button className="icon-button" title="设置" aria-label="设置" onClick={() => setSettingsOpen(true)}><Settings /></button>
           <div className="console-user"><span className="console-avatar">{(user?.email?.charAt(0) ?? 'U').toUpperCase()}</span><div className="console-user-meta"><strong>{settings?.displayName || user?.email || '本地开发用户'}</strong><small><span className={'connection-dot' + (health === 'memory' ? ' warn' : '')} />{health === null ? '连接服务中' : health === 'postgres' ? 'PostgreSQL 已连接' : '内存模式（开发）'} · {roleLabel(user?.role)}</small></div></div>
           <button className="icon-button" title="刷新数据" aria-label="刷新数据" onClick={() => void refresh()}><RefreshCw className={refreshing ? 'spin' : ''} /></button>
@@ -252,8 +271,8 @@ export function App() {
       </div>
     </header>
     <div className="console-layout"><aside className="console-sidebar"><div className="sidebar-group"><div className="sidebar-section-label">工作台</div><Nav active={panel === 'overview'} icon={<LayoutDashboard />} onClick={() => setPanel('overview')}>总览</Nav><Nav active={panel === 'agents'} icon={<Bot />} onClick={() => { setAgentsEntry('templates'); setPanel('agents'); }}>智能体 Agents <span className="sidebar-count">{agents.length}</span></Nav><Nav active={panel === 'conversations' || panel === 'chat'} icon={<MessageSquare />} onClick={() => setPanel(session ? 'chat' : 'conversations')}>会话管理</Nav></div><div className="sidebar-group"><div className="sidebar-section-label">开发与部署</div><Nav active={panel === 'deploy'} icon={<Zap />} onClick={() => setPanel('deploy')}>部署发布</Nav><Nav active={panel === 'control'} icon={<Settings2 />} onClick={() => setPanel('control')}>运维控制</Nav><Nav active={panel === 'approvals'} icon={<FileCheck2 />} onClick={() => setPanel('approvals')}>审批中心</Nav><Nav active={panel === 'observability'} icon={<BarChart3 />} onClick={() => setPanel('observability')}>可观测</Nav></div><div className="sidebar-group"><Nav active={panel === 'library'} icon={<LibraryBig />} onClick={() => setPanel('library')}>资源库 <span className="sidebar-count">{resources.length}</span></Nav><Nav sub active={panel === 'library-knowledge_base'} icon={<BookOpen />} onClick={() => setPanel('library-knowledge_base')}>知识库 <span className="sidebar-count">{resourceCounts.knowledge_base}</span></Nav><Nav sub active={panel === 'library-skill'} icon={<Sparkles />} onClick={() => setPanel('library-skill')}>Skill <span className="sidebar-count">{resourceCounts.skill}</span></Nav><Nav sub active={panel === 'library-tool'} icon={<Wrench />} onClick={() => setPanel('library-tool')}>工具 <span className="sidebar-count">{resourceCounts.tool}</span></Nav><Nav sub active={panel === 'library-plugin'} icon={<Puzzle />} onClick={() => setPanel('library-plugin')}>插件 <span className="sidebar-count">{resourceCounts.plugin}</span></Nav></div></aside>
-      <main className="console-main">{error && <div className="console-alert"><CircleAlert /><span>{error}</span><button className="icon-button" title="关闭提示" aria-label="关闭提示" onClick={() => setError(null)}><X /></button></div>}{panel === 'overview' && <Overview agents={agents} usage={usage} onCreate={() => setModal(true)} onAgents={() => setPanel('agents')} onChat={openChat} />}{panel.startsWith('library') && <ResourceLibrary initialTab={panel === 'library' ? 'all' : panel.replace('library-', '') as ResourceTab} resources={resources} favorites={favorites} onRefresh={() => void refresh()} onCreate={() => { setResourceKind(panel === 'library' ? 'knowledge_base' : panel.replace('library-', '') as ResourceKind); setResourceModal(true); }} onToggleStatus={(item) => void setResourceStatus(item, item.status === 'active' ? 'archived' : 'active')} onView={(item) => void openResourceDetail(item)} onDelete={(item) => void removeResource(item)} onToggleFavorite={(item) => void toggleResourceFavorite(item)} />}{panel === 'agents' && <Agents agents={agents} selectedId={selectedId} entryTab={agentsEntry} favorites={favorites} onSelect={setSelectedId} onCreate={() => setModal(true)} onChat={openChat} onRefresh={() => void refresh()} onCreateFromTemplate={(name) => { setAgentName(name); setModal(true); }} onToggleFavorite={(agent) => void toggleAgentFavorite(agent)} />}{panel === 'chat' && agent && session && <Chat agent={agent} session={session} messages={messages} text={text} sending={sending} onText={setText} onSubmit={submitMessage} onBack={() => setPanel('agents')} />}{panel === 'conversations' && <PlaceholderPanel title="会话管理" description="查看当前用户下各 Agent 的会话记录。会话详情已可从 Agent 页面进入。" icon={<MessageSquare />} onNavigate={() => setPanel('agents')} action="进入我的 Agents" />}{panel === 'deploy' && <PlaceholderPanel title="部署发布" description={capabilities.agentExecution ? '本地开发部署记录' : 'Agent 部署暂未开放'} icon={<Zap />} onNavigate={() => setPanel('agents')} action="查看 Agent 状态" />}{panel === 'control' && <PlaceholderPanel title="运维控制" description="运维命令、状态漂移与执行回执将在控制面接口接入后开放。" icon={<Settings2 />} onNavigate={() => setPanel('overview')} action="返回工作台" />}{panel === 'approvals' && <PlaceholderPanel title="审批中心" description="需要审批的高风险操作将在后续权限与审计模块接入后显示。" icon={<FileCheck2 />} onNavigate={() => setPanel('overview')} action="返回工作台" />}{panel === 'observability' && <ClientMonitoring key={user.userId + ':' + user.organizationId} />}{panel === 'favorites' && <FavoritesPanel favorites={favorites} onOpen={openFavorite} onRemove={(item) => void removeOneFavorite(item)} onGoCreateAgent={() => setModal(true)} onGoLibrary={() => setPanel('library')} />}{panel === 'billing' && <BillingPanel account={account} transactions={transactions} onTopUp={topUp} />}{panel === 'filing' && <FilingPanel filings={filings} onCreate={() => setFilingOpen(true)} onRefresh={() => void refresh()} />}</main>
-    </div>{modal && capabilities.agentLifecycle && <CreateModal name={agentName} engine={agentEngine} onName={setAgentName} onEngine={setAgentEngine} onSubmit={submitAgent} onClose={() => setModal(false)} />}{resourceModal && <CreateResourceModal kind={resourceKind} name={resourceName} description={resourceDescription} content={resourceContent} busy={resourceBusy} onKind={setResourceKind} onName={setResourceName} onDescription={setResourceDescription} onContent={setResourceContent} onSubmit={submitResource} onClose={() => setResourceModal(false)} />}{resourceDetail && <ResourceDetailModal detail={resourceDetail} onClose={() => setResourceDetail(null)} onSave={(content) => void saveResourceContent(content)} />}{noticeOpen && <><div className="pop-layer" onClick={() => setNoticeOpen(false)} /><div className="notice-pop"><div className="notice-pop-head"><strong>通知中心</strong><button type="button" className="text-button" onClick={() => void markAllNotificationsRead()}>全部已读</button></div><div className="notice-pop-list">{notifications.length === 0 ? <div className="search-empty">暂无通知</div> : notifications.slice(0, 12).map((item) => <button key={item.id} type="button" className={'notice-item' + (item.isRead ? ' read' : '')} onClick={() => void markOneNotificationRead(item.id)}><span className="notice-icon"><Bell /></span><span className="notice-main"><strong>{item.title}</strong><p>{item.body}</p><small>{formatTime(item.createdAt)}</small></span>{!item.isRead && <i />}</button>)}</div></div></>}{settingsOpen && <SettingsModal displayName={settings?.displayName ?? null} onSubmit={saveSettings} onClose={() => setSettingsOpen(false)} />}{filingOpen && <FilingModal onSubmit={submitFiling} onClose={() => setFilingOpen(false)} />}
+      <main className="console-main">{error && <div className="console-alert"><CircleAlert /><span>{error}</span><button className="icon-button" title="关闭提示" aria-label="关闭提示" onClick={() => setError(null)}><X /></button></div>}{panel === 'overview' && <Overview agents={agents} usage={usage} onCreate={() => setModal(true)} onAgents={() => setPanel('agents')} onChat={openChat} />}{panel.startsWith('library') && <ResourceLibrary initialTab={panel === 'library' ? 'all' : panel.replace('library-', '') as ResourceTab} resources={resources} favorites={favorites} onRefresh={() => void refresh()} onCreate={() => { setResourceKind(panel === 'library' ? 'knowledge_base' : panel.replace('library-', '') as ResourceKind); setResourceModal(true); }} onToggleStatus={(item) => void setResourceStatus(item, item.status === 'active' ? 'archived' : 'active')} onView={(item) => void openResourceDetail(item)} onDelete={(item) => void removeResource(item)} onToggleFavorite={(item) => void toggleResourceFavorite(item)} />}{panel === 'agents' && <Agents agents={agents} selectedId={selectedId} entryTab={agentsEntry} favorites={favorites} onSelect={setSelectedId} onCreate={() => setModal(true)} onChat={openChat} onRefresh={() => void refresh()} onCreateFromTemplate={(name) => { setAgentName(name); setModal(true); }} onToggleFavorite={(agent) => void toggleAgentFavorite(agent)} />}{panel === 'chat' && agent && session && <Chat agent={agent} session={session} messages={messages} text={text} sending={sending} onText={setText} onSubmit={submitMessage} onBack={() => setPanel('agents')} />}{panel === 'conversations' && <PlaceholderPanel title="会话管理" description="查看当前用户下各 Agent 的会话记录。会话详情已可从 Agent 页面进入。" icon={<MessageSquare />} onNavigate={() => setPanel('agents')} action="进入我的 Agents" />}{panel === 'deploy' && <PlaceholderPanel title="部署发布" description={capabilities.agentExecution ? '本地开发部署记录' : 'Agent 部署暂未开放'} icon={<Zap />} onNavigate={() => setPanel('agents')} action="查看 Agent 状态" />}{panel === 'control' && <PlaceholderPanel title="运维控制" description="运维命令、状态漂移与执行回执将在控制面接口接入后开放。" icon={<Settings2 />} onNavigate={() => setPanel('overview')} action="返回工作台" />}{panel === 'approvals' && <PlaceholderPanel title="审批中心" description="需要审批的高风险操作将在后续权限与审计模块接入后显示。" icon={<FileCheck2 />} onNavigate={() => setPanel('overview')} action="返回工作台" />}{panel === 'observability' && <ClientMonitoring key={user.userId + ':' + user.organizationId} />}{panel === 'notifications' && <NotificationCenter model={notices} />}{panel === 'favorites' && <FavoritesPanel favorites={favorites} onOpen={openFavorite} onRemove={(item) => void removeOneFavorite(item)} onGoCreateAgent={() => setModal(true)} onGoLibrary={() => setPanel('library')} />}{panel === 'billing' && <BillingPanel account={account} transactions={transactions} onTopUp={topUp} />}{panel === 'filing' && <FilingPanel filings={filings} onCreate={() => setFilingOpen(true)} onRefresh={() => void refresh()} />}</main>
+    </div>{modal && capabilities.agentLifecycle && <CreateModal name={agentName} engine={agentEngine} onName={setAgentName} onEngine={setAgentEngine} onSubmit={submitAgent} onClose={() => setModal(false)} />}{resourceModal && <CreateResourceModal kind={resourceKind} name={resourceName} description={resourceDescription} content={resourceContent} busy={resourceBusy} onKind={setResourceKind} onName={setResourceName} onDescription={setResourceDescription} onContent={setResourceContent} onSubmit={submitResource} onClose={() => setResourceModal(false)} />}{resourceDetail && <ResourceDetailModal detail={resourceDetail} onClose={() => setResourceDetail(null)} onSave={(content) => void saveResourceContent(content)} />}{noticeOpen && <NotificationPopover model={notices} onClose={() => setNoticeOpen(false)} onAll={() => { setNoticeOpen(false); setPanel('notifications'); }} />}<NotificationDetail model={notices} />{settingsOpen && <SettingsModal displayName={settings?.displayName ?? null} onSubmit={saveSettings} onClose={() => setSettingsOpen(false)} />}{filingOpen && <FilingModal onSubmit={submitFiling} onClose={() => setFilingOpen(false)} />}
   </div></CapabilitiesContext.Provider>;
 }
 function GlobalSearch({ agents, resources, onOpenAgent, onOpenResource }: { agents: BackendAgent[]; resources: BackendResource[]; onOpenAgent: (id: string) => void; onOpenResource: (kind: ResourceKind) => void }) { const capabilities = useContext(CapabilitiesContext);

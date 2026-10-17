@@ -21,6 +21,14 @@ export const grafanaExpressions = Object.freeze([
   'bairui_runtime_controller_cycle_ok',
 ]);
 
+// D opt-in assets share these expressions with the authenticated proxy. No new dashboard URL or arbitrary PromQL.
+export function publisherDashboardExpressions(environment) {
+  if (!['business', 'preprod', 'isolation'].includes(environment)) throw new Error('announcement_monitoring_environment_invalid');
+  const selector = '{job="bairui-announcement-publisher",bairui_environment="' + environment + '"}';
+  return ['max(bairui_announcement_publisher_pending' + selector + ')', 'max(bairui_announcement_publisher_max_delay_seconds' + selector + ')',
+    'max(bairui_announcement_publisher_blocked' + selector + ')', 'min(bairui_announcement_publisher_cycle_ok' + selector + ')'];
+}
+
 export function businessDashboard() {
   const titles = ['业务 API 可采集副本 / 预期 1', '业务数据库就绪', '业务请求速率', '业务请求 P95', '业务 5xx 比率', '正在处理的请求',
     '数据库连接池 / 总量、空闲、等待', '数据库连接池上限', '业务 API 常驻内存', '业务 API CPU 使用核数', '事件循环延迟 P99', '当前触发告警',

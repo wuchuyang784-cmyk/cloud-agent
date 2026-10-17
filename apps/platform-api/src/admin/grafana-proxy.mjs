@@ -1,9 +1,9 @@
-import { grafanaExpressions } from './grafana-dashboard.mjs';
+import { grafanaExpressions, publisherDashboardExpressions } from './grafana-dashboard.mjs';
 import { monitoringPublicOrigin } from './monitoring-origin.mjs';
 
 export const grafanaPrefix = '/api/admin/grafana/';
 export const grafanaDashboardUrl = grafanaPrefix + 'd/bairui-platform/bairui-platform?kiosk';
-const expressions = new Set(grafanaExpressions);
+const expressions = new Set([...grafanaExpressions, ...['business', 'preprod'].flatMap(publisherDashboardExpressions)]);
 const readPaths = new Set(['api/health', 'api/frontend/settings', 'api/user', 'api/user/orgs', 'api/org', 'api/org/preferences', 'api/user/preferences',
   'api/search', 'api/annotations', 'api/dashboards/uid/bairui-platform', 'api/datasources', 'api/datasources/uid/bairui-prometheus',
   'api/plugins/prometheus/settings', 'api/access-control/user/permissions', 'api/live/ws', 'api/folders/bairui-platform-folder',
