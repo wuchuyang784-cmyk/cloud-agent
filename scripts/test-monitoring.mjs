@@ -77,7 +77,10 @@ async function verify() {
   const headers = { cookie: viewerCookie };
   const dashboard = await request(grafanaPath + '/api/dashboards/uid/bairui-platform', { headers });
   assert.equal(dashboard.status, 200);
-  assert.ok(JSON.parse(dashboard.text).dashboard.panels.length >= 8);
+  const provisioned = JSON.parse(dashboard.text);
+  assert.equal(provisioned.meta.folderUid, 'bairui-platform-folder', 'existing-dashboard folder migration must finish before acceptance');
+  assert.equal(provisioned.dashboard.uid, 'bairui-platform');
+  assert.equal(provisioned.dashboard.panels.length, 12);
   const orgs = await request(grafanaPath + '/api/user/orgs', { headers });
   assert.equal(orgs.status, 200); assert.equal(JSON.parse(orgs.text)[0].role, 'Viewer');
   assert.equal((await request(grafanaPath + '/login', { headers })).status, 404);

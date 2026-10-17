@@ -81,7 +81,7 @@ export function monitoringAssets(runtime) {
     options: type === 'stat' ? { reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false } } : { legend: { displayMode: 'list', placement: 'bottom' }, tooltip: { mode: 'multi' } },
   });
   const dashboard = { uid: 'bairui-platform', title: 'BaiRui 平台运行监控', tags: ['bairui', 'preprod'],
-    schemaVersion: 39, version: 1, editable: false, timezone: 'browser', refresh: '15s', time: { from: 'now-30m', to: 'now' },
+    schemaVersion: 39, version: 2, editable: false, timezone: 'browser', refresh: '15s', time: { from: 'now-30m', to: 'now' },
     panels: [
       panel(1, 'API 可采集副本 / 预期 2', 'sum(up{job="bairui-api"}) or vector(0)', 'short', 'stat', '可用副本'),
       panel(2, '数据库就绪 / 每 API', 'bairui_database_ready{job="bairui-api"}', 'short', 'stat'),

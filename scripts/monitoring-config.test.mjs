@@ -8,6 +8,17 @@ import { monitoringRevision } from './monitoring-config.mjs';
 const input = { installation: 'a'.repeat(24), nodeId: 'local-node', proxyIp: '10.0.1.3', revision: 'b'.repeat(16), schemaHash: 'c'.repeat(64) };
 const monitorInput = { ...input, monitoring: { enabled: true, gatewayIp: '10.0.3.9' } };
 
+test('existing Grafana dashboard checksum is bumped to migrate its fixed folder without replacing identity or volume', () => {
+  const files = monitoringAssets(), dashboard = files['dashboard.json'];
+  assert.equal(dashboard.version, 2, 'existing Grafana volumes need changed dashboard bytes, not only a provider folder update');
+  assert.equal(dashboard.uid, 'bairui-platform'); assert.equal(dashboard.schemaVersion, 39); assert.equal(dashboard.panels.length, 12);
+  assert.equal(files['dashboards.json'].providers[0].folderUid, 'bairui-platform-folder');
+  assert.equal(files['dashboards.json'].providers[0].folder, 'BaiRui 平台监控');
+  assert.ok(monitoringStack(monitorInput).services.grafana.volumes.includes('grafanadata:/var/lib/grafana'));
+  assert.equal(monitoringStack(monitorInput).volumes.grafanadata.external.name, monitorNames.grafanaVolume);
+  assert.notEqual(JSON.stringify({ ...dashboard, version: 1 }), JSON.stringify(dashboard));
+});
+
 test('managed runtime monitoring is opt-in and uses separate fixed environment targets', () => {
   const runtime = { enabled: true, environments: ['business', 'preprod'] };
   const assets = monitoringAssets(runtime);

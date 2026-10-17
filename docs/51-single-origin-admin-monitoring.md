@@ -67,7 +67,7 @@ npm run test:runtime-deployment
 npm run test:monitoring:grafana-compat
 ```
 
-最后一项使用临时、带随机归属标签的实际 Caddy/Grafana 环境，不启动常驻业务或预发，结束后只清理本次容器和网络。它验证代理与 Viewer 链路；其认证 fixture 不等于真实 Better Auth/业务库部署验收。
+最后一项使用临时、带随机归属标签的实际 Caddy/Grafana 环境，不启动常驻业务或预发，结束后只清理本次容器、网络和专用卷。它验证代理与 Viewer 链路及下述既有卷升级；其认证 fixture 不等于真实 Better Auth/业务库部署验收。设置 `BAIRUI_PLAYWRIGHT_MODULE` 为已安装 Playwright 模块的绝对路径可执行浏览器部分；未设置时不代表浏览器验收通过。
 
 `test:preprod`、`test:monitoring` 仍是显式常驻预发故障验收，会重启相关服务；不要对正在使用的环境直接运行。它们现在使用真实平台测试会话访问同源面板，不再依赖 Grafana 应急密码登录。测试账号只在独立预发创建，监控专项退出测试会话并撤销临时平台角色，不修改业务账号。
 
@@ -82,3 +82,25 @@ npm run test:monitoring:grafana-compat
 预发面板 provider 使用固定 folderUid 和新的文件夹标题，原随机 UID 文件夹保留，dashboard UID 不变；已有持久卷升级仍需目标环境验收。本机临时资源已回收，原常驻服务保持停止。
 
 参考：[Caddy forward_auth](https://caddyserver.com/docs/caddyfile/directives/forward_auth)、[Grafana 子路径配置](https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/#serve_from_sub_path)。
+
+### 既有看板升级：version 2
+
+Grafana 13.2.2 的文件 provisioning 会比较看板文件字节的校验和；内容未改变时跳过保存。因此，仅改 provider 的 `folderUid` 或重启服务，已存在的 `bairui-platform` 看板可能仍留在旧目录。此次将生成 JSON 的 `version` 从 1 提升为 2，使文件内容改变；保留 dashboard UID、固定目录 UID、持久卷与代理白名单，不删除旧文件夹。这里的 JSON 版本用于改变文件内容，不要求 Grafana API 返回的内部修订号恰好为 2。源码依据：[v13.2.2 file_reader.go](https://github.com/grafana/grafana/blob/v13.2.2/pkg/services/provisioning/dashboards/file_reader.go)。
+
+已有环境更新前，核对当前安装身份、Grafana 服务和卷的归属，保存旧状态、监控 stack、生成配置及服务规格。仅停止本安装 Grafana 的单副本，等待容器完全退出后，冷备原 Grafana 数据卷（包含 `grafana.db`），检验归档可列出且计算 SHA-256。其他采集组件、API、数据库和网关不需停机。不得删除卷、重新生成 Secret 或重建数据库来完成迁移。
+
+部署更新后的监控配置，继续挂载原卷。通过已登录的平台管理会话请求 `/api/admin/grafana/api/dashboards/uid/bairui-platform`，必须确认 `meta.folderUid === 'bairui-platform-folder'`、UID 不变且仍有 12 个面板；核对原卷、Secret ID 和无关服务的容器 ID 未改变。在管理端打开“运行监控”，滚动到所有面板，检查每个 `/api/ds/query` 响应中的对应结果状态成功，不能只看 HTTP 200。允许合法空数据；“当前触发告警”无数据可表示没有告警，不要求每张图都有数值。
+
+隔离回归使用同一个真实 Grafana 持久卷分三步验证：旧 version1 配置创建看板并冷备；只升级 provider、重启并复现旧目录未迁移；再发布 version2 看板，确认相同数据库 ID/UID 迁移、旧目录保留。浏览器检查 12 个面板完成查询、无意外接口或查询错误，报告和备份写入忽略的 `output/monitoring-single-origin/<时间>/`。此用例不会启动已停止的本机常驻环境。
+
+若升级失败，先恢复备份的旧源码和监控 stack，使用原卷与原 Secret 恢复原服务；不要覆盖仍在运行的 SQLite 数据库。需要恢复卷内容时，先停止并确认 Grafana 已退出，再依据已验证冷备单独安排恢复。保留失败现场及备份，不自动清空数据。
+
+#### 2026-10-17 升级验证记录
+
+配置/部署回归组合 80 项通过，官方 Prometheus/Alertmanager 配置与 7 条平台规则校验通过；真实旧配置同卷三阶段升级及浏览器 12 面板通过。最新隔离报告为 `output/monitoring-single-origin/2026-10-17T12-22-26-645Z/report.json`，临时资源已清理，本机常驻服务未启动。独立质量复核无阻塞项。
+
+用户指定的 Linux 云端项目已完成冷备和监控栈更新，平台镜像未升级。备份在服务器 `/home/ubuntu/cloud-agent/output/grafana-folder-upgrade/backups/2026-10-17T12-21-52-676Z/`，包含旧源码、状态、stack、服务规格、配置和 Grafana 数据归档；归档已验证可读并记录 SHA-256。首次冷备因 root 生成的 0600 归档无法由部署账号读取而中止，原 Grafana 已恢复且当时未发布配置；随后只调整归档属主，不放宽权限，冷备和部署成功。
+
+云端真实 Better Auth 临时 `platform_viewer` 经同源接口及浏览器检查，确认旧随机目录迁移到 `bairui-platform-folder`、看板数据库 ID/UID 保留、12 个面板全部完成查询，无接口、查询或页面错误，当前告警允许空数据。监控原卷创建时间、Secret ID、安装身份与平台 API/数据库/网关容器 ID 均保持不变。临时会话已退出、角色已撤销，私有 Cookie 文件和本次 SSH 隧道已清理，未修改已有账号或代理白名单。云端采集与四项监控服务健康；这不是生产容量或真实 Agent 执行验收。
+
+脱敏云端报告位于服务器 `output/grafana-folder-upgrade/{api-acceptance,browser-acceptance,identity-cleanup}.json`，本机副本和截图位于相同相对目录。本次部署先单独发布版本行修复；后续 Git 提交同时包含同卷升级回归与本文档，不包含备份、Cookie 或本机私有输出。
