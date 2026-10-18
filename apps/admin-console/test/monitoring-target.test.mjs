@@ -20,3 +20,25 @@ test('monitoring uses an embedded dashboard, checks health for every scope and r
   assert.match(source, /<GrafanaFrame key=\{[^}]+\}/);
   assert.match(source, /set[A-Za-z]+\([^)]*=>[^)]*\+ 1/);
 });
+
+test('host resource selection uses a fixed local URL without weakening server target validation', () => {
+  const platform = '/api/admin/grafana/d/bairui-platform/bairui-platform?kiosk';
+  const host = '/api/admin/grafana/d/bairui-host/bairui-host?kiosk';
+  assert.deepEqual(monitoringTarget({ dashboardUrl: platform, scope: 'preprod' }, 'host'), { url: host, scope: 'preprod' });
+  assert.deepEqual(monitoringTarget({ dashboardUrl: platform, scope: 'business' }, 'platform'), { url: platform, scope: 'business' });
+  assert.equal(monitoringTarget({ dashboardUrl: host, scope: 'preprod' }, 'host'), null);
+  assert.equal(monitoringTarget({ dashboardUrl: 'https://attacker.example', scope: 'preprod' }, 'host'), null);
+  assert.equal(monitoringTarget({ dashboardUrl: platform, scope: 'preprod' }, 'unknown'), null);
+});
+
+test('dashboard switch remounts health probe by scope, selection and retry and explains Linux host metrics', async () => {
+  const source = await readFile(new URL('../src/MonitoringView.tsx', import.meta.url), 'utf8');
+  assert.match(source, /setDashboard\('platform'\)/);
+  assert.match(source, /setDashboard\('host'\)/);
+  assert.match(source, />平台运行<\/button>/);
+  assert.match(source, />主机资源<\/button>/);
+  assert.match(source, /key=\{`\$\{target.scope\}:\$\{target.url\}:\$\{revision\}`\}/);
+  assert.match(source, /setPhase\('loading'\)/);
+  assert.match(source, /Linux/);
+  assert.match(source, /Docker Desktop.*VM/);
+});

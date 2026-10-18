@@ -4,6 +4,8 @@
 
 管理端同源监控与统一 HTTPS 入口的最新接入说明：[51-single-origin-admin-monitoring.md](51-single-origin-admin-monitoring.md)；历史 9443 独立入口不再作为新版本配置。
 
+原生 Linux 整机指标、24 个主机面板及后续部署验收：[56-m1-host-monitoring.md](56-m1-host-monitoring.md)。M1 已开发并完成隔离实采验证，不等于常驻服务器已升级，不包含容器/用户 Agent/Token 计费监控。
+
 ## 跨仓权威入口
 
 - 整体执行顺序：`BaiRui-agent/docs/AI-DEVELOPMENT-PLAN.md`

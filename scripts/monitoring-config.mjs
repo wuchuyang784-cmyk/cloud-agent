@@ -4,6 +4,8 @@ import { isIP } from 'node:net';
 import { runtimeRules } from './runtime-monitoring-config.mjs';
 import { runtimeNames } from './runtime-deployment-config.mjs';
 import { monitoringPublicOrigin } from '../apps/platform-api/src/admin/monitoring-origin.mjs';
+import { hostScrapeJob } from './host-monitoring-config.mjs';
+import { hostDashboard } from '../apps/platform-api/src/admin/host-dashboard.mjs';
 
 export const monitorNames = Object.freeze({
   stack: 'bairui-monitor', network: 'bairui-preprod-monitor',
@@ -28,7 +30,8 @@ function runtimeEnvironments(runtime) {
   for (const env of runtime.environments) runtimeNames(env);
   return [...runtime.environments].sort();
 }
-export function monitoringAssets(runtime) {
+export function monitoringAssets(runtime, host) {
+  assert.ok(host === undefined || host && typeof host === 'object' && typeof host.enabled === 'boolean', 'host_monitoring_configuration_invalid');
   const environments = runtimeEnvironments(runtime);
   const rule = (alert, expr, duration = '1m', severity = 'warning') => ({ alert, expr, for: duration, labels: { severity } });
   const traffic = 'bairui_http_requests_total{job="bairui-api",route!~"/(livez|readyz|healthz)"}';
@@ -58,6 +61,7 @@ export function monitoringAssets(runtime) {
     ],
   };
   prometheus.scrape_configs.find(job => job.job_name === 'grafana').metrics_path = '/api/admin/grafana/metrics';
+  if (host?.enabled) prometheus.scrape_configs.push(hostScrapeJob());
   if (environments.length) {
     rules.groups.push(...runtimeRules().groups);
     for (const environment of environments) prometheus.scrape_configs.push({
@@ -98,15 +102,15 @@ export function monitoringAssets(runtime) {
     ],
   };
   return {
-    'prometheus.json': prometheus, 'rules.json': rules, 'alertmanager.json': alertmanager, 'dashboard.json': dashboard,
+    'prometheus.json': prometheus, 'rules.json': rules, 'alertmanager.json': alertmanager, 'dashboard.json': dashboard, 'dashboard-host.json': hostDashboard(),
     'datasources.json': { apiVersion: 1, datasources: [{ ...datasource, name: 'BaiRui Prometheus', access: 'proxy',
       url: 'http://' + monitorNames.prometheus + ':9090', isDefault: true, editable: false, jsonData: { timeInterval: '15s' } }] },
     'dashboards.json': { apiVersion: 1, providers: [{ name: 'bairui', orgId: 1, folder: 'BaiRui 平台监控', folderUid: 'bairui-platform-folder', type: 'file', disableDeletion: true, allowUiUpdates: false, options: { path: '/etc/bairui/dashboards' } }] },
   };
 }
 
-export const monitoringRevision = runtime => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(runtime), images: monitorImages })).digest('hex').slice(0, 16);
-export const monitorConfigName = (name, runtime) => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision(runtime);
+export const monitoringRevision = (runtime, host) => createHash('sha256').update(JSON.stringify({ assets: monitoringAssets(runtime, host), images: monitorImages })).digest('hex').slice(0, 16);
+export const monitorConfigName = (name, runtime, host) => 'bairui-monitor-' + name.replace('.json', '') + '-' + monitoringRevision(runtime, host);
 
 export function monitoringStack({ installation, nodeId, revision, monitoring, publicOrigin = 'https://localhost:8443' }) {
   const consoleOrigin = monitoringPublicOrigin(publicOrigin);
@@ -151,7 +155,7 @@ export function monitoringStack({ installation, nodeId, revision, monitoring, pu
           GF_USERS_DEFAULT_LANGUAGE: 'zh-Hans', GF_AUTH_DISABLE_LOGIN_FORM: 'true', GF_AUTH_BASIC_ENABLED: 'false', GF_LIVE_MAX_CONNECTIONS: '0',
         },
         volumes: ['grafanadata:/var/lib/grafana', { type: 'tmpfs', target: '/tmp', tmpfs: { size: 16777216 } }],
-        configs: [config('datasources.json', '/etc/grafana/provisioning/datasources/bairui.yaml'), config('dashboards.json', '/etc/grafana/provisioning/dashboards/bairui.yaml'), config('dashboard.json', '/etc/bairui/dashboards/platform.json')],
+        configs: [config('datasources.json', '/etc/grafana/provisioning/datasources/bairui.yaml'), config('dashboards.json', '/etc/grafana/provisioning/dashboards/bairui.yaml'), config('dashboard.json', '/etc/bairui/dashboards/platform.json'), config('dashboard-host.json', '/etc/bairui/dashboards/host.json')],
         secrets: [secret('grafana_password', 'grafana-password', '472')], healthcheck: health(3000, '/api/admin/grafana/api/health'),
       },
       receiver: { ...service('bairui/platform-api-preprod:' + revision, '1000:1000', '128M', '0.20'),
@@ -165,6 +169,6 @@ export function monitoringStack({ installation, nodeId, revision, monitoring, pu
     volumes: { promdata: { external: { name: monitorNames.promVolume } }, grafanadata: { external: { name: monitorNames.grafanaVolume } }, alertdata: { external: { name: monitorNames.alertVolume } }, receipts: { external: { name: monitorNames.receiverVolume } } },
     secrets: { metrics_token: { external: { name: monitorNames.metricsSecret } }, alert_token: { external: { name: monitorNames.alertSecret } }, grafana_password: { external: { name: monitorNames.grafanaSecret } },
       ...Object.fromEntries(environments.map(e => ['runtime_' + e + '_metrics', { external: { name: runtimeNames(e).metricsSecret } }])) },
-    configs: Object.fromEntries(Object.keys(monitoringAssets(monitoring?.runtime)).map(name => [name, { external: { name: monitorConfigName(name, monitoring?.runtime) } }])),
+    configs: Object.fromEntries(Object.keys(monitoringAssets(monitoring?.runtime, monitoring?.host)).map(name => [name, { external: { name: monitorConfigName(name, monitoring?.runtime, monitoring?.host) } }])),
   };
 }

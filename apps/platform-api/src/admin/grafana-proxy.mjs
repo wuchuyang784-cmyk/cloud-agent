@@ -1,16 +1,20 @@
 import { grafanaExpressions, publisherDashboardExpressions } from './grafana-dashboard.mjs';
 import { monitoringPublicOrigin } from './monitoring-origin.mjs';
+import { hostDashboardExpressions } from './host-dashboard.mjs';
 
 export const grafanaPrefix = '/api/admin/grafana/';
 export const grafanaDashboardUrl = grafanaPrefix + 'd/bairui-platform/bairui-platform?kiosk';
-const expressions = new Set([...grafanaExpressions, ...['business', 'preprod'].flatMap(publisherDashboardExpressions)]);
+const expressions = new Set([...grafanaExpressions, ...hostDashboardExpressions, ...['business', 'preprod'].flatMap(publisherDashboardExpressions)]);
 const readPaths = new Set(['api/health', 'api/frontend/settings', 'api/user', 'api/user/orgs', 'api/org', 'api/org/preferences', 'api/user/preferences',
   'api/search', 'api/annotations', 'api/dashboards/uid/bairui-platform', 'api/datasources', 'api/datasources/uid/bairui-prometheus',
   'api/plugins/prometheus/settings', 'api/access-control/user/permissions', 'api/live/ws', 'api/folders/bairui-platform-folder',
   'apis/preferences.grafana.app/v1/namespaces/default/preferences/merged',
   'apis/features.grafana.app/v0alpha1/namespaces/default/ofrep/v1/evaluate/flags',
   'apis/dashboard.grafana.app/', 'apis/dashboard.grafana.app/v2beta1/namespaces/default/dashboards/bairui-platform/dto',
-  'apis/dashboard.grafana.app/v2/namespaces/default/dashboards/bairui-platform/dto']);
+  'apis/dashboard.grafana.app/v2/namespaces/default/dashboards/bairui-platform/dto',
+  'api/dashboards/uid/bairui-host',
+  'apis/dashboard.grafana.app/v2beta1/namespaces/default/dashboards/bairui-host/dto',
+  'apis/dashboard.grafana.app/v2/namespaces/default/dashboards/bairui-host/dto']);
 
 function fixedQuery(body) {
   if (!body || !Array.isArray(body.queries) || body.queries.length < 1 || body.queries.length > 20) throw new Error('invalid_grafana_query');
@@ -54,7 +58,7 @@ export function createGrafanaProxy({ baseUrl = '', token = '', publicOrigin = ''
       const discardedTelemetry = path === 'api/frontend-metrics' && request.method === 'POST';
       const jsonPost = writeQuery || featureRead || discardedTelemetry;
       const staticAsset = /^public\/[A-Za-z0-9_./-]+$/.test(path) && !path.includes('..');
-      const dashboard = path === 'd/bairui-platform/bairui-platform';
+      const dashboard = path === 'd/bairui-platform/bairui-platform' || path === 'd/bairui-host/bairui-host';
       if (!jsonPost && (!['GET', 'HEAD'].includes(request.method) || (!staticAsset && !dashboard && !readPaths.has(path) && path !== ''))) return fail(404, 'not_found');
       if (path === 'api/live/ws') return fail(404, 'not_found'); // Live disabled, never relay WebSockets.
       if (url.search.length > 2048 || [...url.searchParams].some(([key, value]) => !['orgId', 'kiosk', 'from', 'to', 'refresh', 'timezone', 'theme', 'requestId', 'ds_type',
@@ -63,6 +67,9 @@ export function createGrafanaProxy({ baseUrl = '', token = '', publicOrigin = ''
       for (const key of ['accesscontrol', 'isLegacyCall']) if (url.searchParams.has(key) && (path !== 'api/folders/bairui-platform-folder'
         || !['true', 'false'].includes(url.searchParams.get(key)))) return fail(422, 'invalid_grafana_query');
       if (url.searchParams.has('_cache') && !staticAsset) return fail(422, 'invalid_grafana_query');
+      if (url.searchParams.has('dashboardUID') && (!['api/search', 'api/annotations'].includes(path)
+        || url.searchParams.getAll('dashboardUID').length !== 1
+        || !['bairui-platform', 'bairui-host'].includes(url.searchParams.get('dashboardUID')))) return fail(422, 'invalid_grafana_query');
       if (url.searchParams.has('matchAny') && (path !== 'api/annotations'
         || !['true', 'false'].includes(url.searchParams.get('matchAny')))) return fail(422, 'invalid_grafana_query');
       if (request.headers.origin && request.headers.origin !== browserOrigin) return fail(403, 'origin_rejected');

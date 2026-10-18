@@ -12,14 +12,14 @@ import { monitoringAssets, monitoringStack, monitorImages, monitorNames } from '
 // Real current API -> generated Caddy -> Grafana/Prometheus. Authentication is a
 // disposable MemoryStore fixture, not proof of a real Better Auth deployment.
 const suffix = randomBytes(8).toString('hex'), label = 'bairui.grafana.compat';
-const names = Object.fromEntries(['network', 'api', 'gateway', 'grafana', 'prometheus', 'volume'].map(kind => [kind, 'bairui-grafana-compat-' + kind + '-' + suffix]));
+const names = Object.fromEntries(['network', 'api', 'gateway', 'grafana', 'prometheus', 'volume'].map(kind => [kind, 'bairui-grafana-compat-' + kind.toLowerCase() + '-' + suffix]));
 const caddyImage = 'caddy:2.10.2-alpine';
 const apiImage = 'bairui/platform-api-preprod:984167c866f5c602';
 const directory = await mkdtemp(join(tmpdir(), 'bairui-grafana-compat-'));
 const output = join(root, 'output', 'monitoring-single-origin', new Date().toISOString().replace(/[:.]/g, '-'));
 const report = { success: false, authentication: 'isolated fixture, not real Better Auth', checks: [] };
 const checks = message => { report.checks.push(message); console.log('PASS: ' + message); };
-let browser;
+let browser, browserPage;
 
 async function waitFor(url, status = 200, headers = {}, timeout = 90000) {
   const deadline = Date.now() + timeout;
@@ -174,10 +174,15 @@ try {
   await docker(['stop', '--timeout', '15', names.grafana]); await removeOwned('container', names.grafana);
 
   await writeFile(join(directory, 'dashboards/platform.json'), JSON.stringify(assets['dashboard.json']));
+  // M1 did not exist in the legacy installation. Provision it for the first
+  // time only after the fixed provider is installed, as in an actual upgrade.
+  await writeFile(join(directory, 'dashboards/host.json'), JSON.stringify(assets['dashboard-host.json']));
   await startGrafana(); await waitFor(prefix + '/api/health', 200, headers);
   const upgraded = await document();
   assert.equal(upgraded.meta.folderUid, 'bairui-platform-folder', 'changed dashboard bytes must migrate an already provisioned dashboard');
   assert.equal(upgraded.dashboard.uid, old.dashboard.uid); assert.equal(upgraded.dashboard.id, oldId);
+  const hostDocument = await (await waitFor(prefix + '/api/dashboards/uid/bairui-host', 200, headers)).json();
+  assert.equal(hostDocument.meta.folderUid, 'bairui-platform-folder', 'new M1 dashboard must belong to the fixed folder');
   const volumeAfter = await inspect('volume', names.volume);
   assert.equal(volumeAfter.Name, volumeBefore.Name); assert.equal(volumeAfter.CreatedAt, volumeBefore.CreatedAt);
   const folders = await (await fetch(prefix + '/api/search?type=dash-folder', { headers })).json();
@@ -216,7 +221,11 @@ try {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     await context.addCookies([{ name: 'platform', value: 'valid', url: origin }]);
     const page = await context.newPage();
+    browserPage = page;
     const failedNative = [], pageErrors = [], failedQueries = [], pendingQueries = new Set(), queriedPanels = new Set();
+    const platformExpressions = assets['dashboard.json'].panels.flatMap(panel => panel.targets.map(target => target.expr));
+    const hostExpressions = assets['dashboard-host.json'].panels.flatMap(panel => panel.targets.map(target => target.expr));
+    const covered = expected => expected.filter(expr => queriedPanels.has(expr));
     page.on('pageerror', error => pageErrors.push(error.message));
     page.on('response', response => {
       const url = new URL(response.url());
@@ -239,11 +248,12 @@ try {
     await iframe.getByText('API 可采集副本 / 预期 2', { exact: true }).waitFor({ timeout: 45000 });
     for (const panel of assets['dashboard.json'].panels) await iframe.getByText(panel.title, { exact: true }).scrollIntoViewIfNeeded();
     const queryDeadline = Date.now() + 30000;
-    while (queriedPanels.size < assets['dashboard.json'].panels.length && Date.now() < queryDeadline) await delay(100);
+    while (covered(platformExpressions).length < platformExpressions.length && Date.now() < queryDeadline) await delay(100);
     await Promise.all([...pendingQueries]);
-    assert.equal(queriedPanels.size, assets['dashboard.json'].panels.length, 'all preprod panels must complete native queries');
+    assert.deepEqual(covered(platformExpressions).sort(), [...platformExpressions].sort(), 'all preprod expressions must complete native queries');
     assert.deepEqual(failedQueries, [], 'per-panel query failures even when outer HTTP status is 200');
     assert.deepEqual(failedNative, [], 'native Grafana request failures'); assert.deepEqual(pageErrors, []);
+    const platformPanelCount = covered(platformExpressions).length;
     assert.equal(await iframe.getByText('Unexpected alert rules response.', { exact: true }).count(), 0);
     assert.equal(await page.getByRole('link', { name: '独立打开 Grafana' }).count(), 0);
     const refreshed = page.waitForResponse(response => response.url() === prefix + '/api/health');
@@ -255,10 +265,36 @@ try {
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await page.screenshot({ path: join(output, 'admin-' + width + '.png') });
     }
+    await page.getByRole('button', { name: '主机资源', exact: true }).click();
+    const hostFrame = page.frameLocator('iframe');
+    assert.match(await page.locator('iframe').getAttribute('src'), /\/d\/bairui-host\//);
+    for (const panel of assets['dashboard-host.json'].panels) {
+      await hostFrame.getByText(panel.title, { exact: true }).waitFor({ timeout: 45000 });
+      await hostFrame.getByText(panel.title, { exact: true }).scrollIntoViewIfNeeded();
+    }
+    const hostDeadline = Date.now() + 45000;
+    while (covered(hostExpressions).length < hostExpressions.length && Date.now() < hostDeadline) await delay(100);
+    await Promise.all([...pendingQueries]);
+    assert.deepEqual(covered(hostExpressions).sort(), [...hostExpressions].sort(), 'all 24 host expressions must complete; late platform responses cannot count as host coverage');
+    assert.deepEqual(failedQueries, []); assert.deepEqual(failedNative, []); assert.deepEqual(pageErrors, []);
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 });
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+      await page.screenshot({ path: join(output, 'admin-host-' + width + '.png') });
+    }
+    const hostRetry = page.waitForResponse(response => response.url() === prefix + '/api/health');
+    await page.getByRole('button', { name: '刷新监控', exact: true }).click(); await hostRetry;
+    await page.frameLocator('iframe').getByText(assets['dashboard-host.json'].panels[0].title, { exact: true }).waitFor({ timeout: 45000 });
+    assert.match(await page.locator('iframe').getAttribute('src'), /\/d\/bairui-host\//);
+    await page.getByRole('button', { name: '平台运行', exact: true }).click();
+    await page.frameLocator('iframe').getByText('API 可采集副本 / 预期 2', { exact: true }).waitFor({ timeout: 45000 });
     assert.equal(context.pages().length, 1);
-    report.browser = { queriedPanels: queriedPanels.size, httpErrors: failedNative, queryErrors: failedQueries, pageErrors,
+    report.browser = { queriedPanels: platformPanelCount, hostPanels: covered(hostExpressions).length, hostExpressions: covered(hostExpressions), hostCollectionEnabled: false, httpErrors: [...failedNative], queryErrors: [...failedQueries], pageErrors: [...pageErrors],
       emptyDataAllowed: true, folderUid: (await document()).meta.folderUid };
-    checks('browser admin embeds all 12 queried Grafana panels without native request errors, retry rechecks health, desktop/mobile keep one tab and one origin');
+    checks('browser admin switches between 12 platform and 24 host panels without query errors; host retry, desktop/mobile keep one tab and one origin');
+    // Intentional suspension/outage checks below are separate from the healthy
+    // browser phase; close its polling requests before injecting those faults.
+    await context.close();
   }
   await writeFile(join(directory, 'control'), 'paused');
   assert.equal((await fetch(prefix + '/api/user', { headers })).status, 403);
@@ -270,6 +306,13 @@ try {
   assert.equal((await fetch(origin + '/api/admin/me', { headers })).status, 200);
   checks('suspension and revoked fixture session deny next request; Grafana failure leaves account management available');
   report.success = true;
+} catch (error) {
+  report.error = error.message;
+  if (browserPage) {
+    report.failure = { url: browserPage.url(), frames: await Promise.all(browserPage.frames().map(async frame => ({ url: frame.url(), text: await frame.locator('body').innerText().catch(() => 'unavailable') }))) };
+    await browserPage.screenshot({ path: join(output, 'failure.png'), fullPage: true }).catch(() => {});
+  }
+  throw error;
 } finally {
   await browser?.close();
   for (const name of [names.grafana, names.prometheus, names.api, names.gateway]) await removeOwned('container', name);

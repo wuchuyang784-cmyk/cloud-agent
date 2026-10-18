@@ -57,6 +57,22 @@ test('session proxy forwards only the original cookie and rechecks active platfo
   assert.equal(seen.length, 1);
 });
 
+test('host dashboard HTML and DTO require an active platform session on every request', async t => {
+  const { request, store, seen, signOut } = await fixture(t, null, { session: true, scope: 'preprod' });
+  for (const path of ['d/bairui-host/bairui-host?kiosk', 'api/dashboards/uid/bairui-host',
+    'apis/dashboard.grafana.app/v2/namespaces/default/dashboards/bairui-host/dto']) {
+    assert.equal((await request(path, null)).status, 401);
+    assert.equal((await request(path, 'ordinary')).status, 403);
+    assert.equal((await request(path)).status, 200);
+  }
+  assert.equal(seen.length, 3);
+  store.accountGovernance = new Map([['viewer', { status: 'suspended', version: 1 }]]);
+  assert.equal((await request('api/dashboards/uid/bairui-host')).status, 403);
+  store.accountGovernance.clear(); signOut();
+  assert.equal((await request('d/bairui-host/bairui-host?kiosk')).status, 401);
+  assert.equal(seen.length, 3);
+});
+
 test('session mode accepts only the exact private gateway and no bearer configuration', () => {
   const config = { authMode: 'session', baseUrl: 'http://bairui-preprod-gateway:9494', publicOrigin: 'https://cloud.example.test' };
   assert.equal(createGrafanaProxy(config).enabled, true);

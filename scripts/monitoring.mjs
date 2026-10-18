@@ -10,6 +10,7 @@ import { monitoringStack, monitoringAssets, monitorNames, monitorVolumes, monito
 import { validateMonitoring } from './monitoring-rules.test.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
 import { runtimeNames } from './runtime-deployment-config.mjs';
+import { startHostMonitoring, stopHostMonitoring, assertHostMonitoringResources } from './host-monitoring.mjs';
 
 // Monitoring shares the installation lock and never consumes the business .env.
 export function monitoringServiceReady(service, rows, expectedImage) {
@@ -21,7 +22,7 @@ export function monitoringServiceReady(service, rows, expectedImage) {
 export async function assertMonitoringResources(state, { requirePersistent = true } = {}) {
   const found = {};
   for (const [kind, resources] of Object.entries({ service: monitorServices.map(key => monitorNames[key]), network: [monitorNames.network], volume: monitorVolumes, secret: monitorSecrets,
-    config: Object.keys(monitoringAssets(state.monitoring?.runtime)).map(n => monitorConfigName(n, state.monitoring?.runtime)) })) {
+    config: Object.keys(monitoringAssets(state.monitoring?.runtime, state.monitoring?.host)).map(n => monitorConfigName(n, state.monitoring?.runtime, state.monitoring?.host)) })) {
     for (const name of resources) found[name] = await owned(kind, name, state);
   }
   if (state.monitoring?.runtime?.enabled) {
@@ -30,6 +31,7 @@ export async function assertMonitoringResources(state, { requirePersistent = tru
       if (!await owned('secret', name, state)) throw new Error('Runtime 指标 Secret 缺失：' + name);
     }
   }
+  if (state.monitoring?.host?.resourcesReady) await assertHostMonitoringResources(state);
   const network = found[monitorNames.network];
   if (network && (network.Driver !== 'overlay' || !network.Attachable || !network.Internal)) throw new Error('monitoring_network_configuration_invalid');
   if (requirePersistent) {
@@ -71,8 +73,9 @@ export async function ensureMonitoringResources(state) {
 
 export async function deployMonitoring(state) {
   await assertMonitoringResources(state);
-  for (const [name, asset] of Object.entries(monitoringAssets(state.monitoring?.runtime))) {
-    const target = monitorConfigName(name, state.monitoring?.runtime);
+  if (state.monitoring?.host?.enabled) await startHostMonitoring(state);
+  for (const [name, asset] of Object.entries(monitoringAssets(state.monitoring?.runtime, state.monitoring?.host))) {
+    const target = monitorConfigName(name, state.monitoring?.runtime, state.monitoring?.host);
     if (!await owned('config', target, state)) await docker(['config', 'create', '--label', label + '=' + state.installation, target, '-'], { input: JSON.stringify(asset) });
   }
   const path = join(output, 'monitoring-stack.json');
@@ -90,7 +93,7 @@ export async function deployMonitoring(state) {
   }, '四项监控服务启动', 240000);
   const health = await request('/api/admin/grafana/api/health');
   if (health.status !== 401) throw new Error('管理端同源 Grafana 匿名拒绝检查失败。');
-  state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision(state.monitoring?.runtime);
+  state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision(state.monitoring?.runtime, state.monitoring?.host);
   await saveState(state);
 }
 
@@ -121,7 +124,7 @@ export async function monitorUp() {
   await assertMonitoringResources(state, { requirePersistent: Boolean(state.monitoring?.resourcesReady) });
   await ensureMonitoringImages();
 
-  await validateMonitoring();
+  await validateMonitoring(state.monitoring?.runtime, state.monitoring?.host);
   await ensureMonitoringResources(state);
   state.monitoring.enabled = true;
   await saveState(state);
@@ -132,6 +135,7 @@ export async function monitorUp() {
 
 export async function stopMonitoringServices(state) {
   await assertMonitoringResources(state);
+  if (state.monitoring?.host?.resourcesReady) await stopHostMonitoring(state);
   for (const key of monitorServices) if (await owned('service', monitorNames[key], state)) await docker(['service', 'scale', '--detach=true', monitorNames[key] + '=0']);
   await waitUntil(async () => {
     for (const key of monitorServices) if ((await containers(monitorNames[key], state)).length) return false;

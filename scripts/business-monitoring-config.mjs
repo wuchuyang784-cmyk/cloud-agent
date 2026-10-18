@@ -158,6 +158,7 @@ export function businessContainerArguments(kind, { installation, revision, direc
   } else if (kind === 'grafana') {
     mount(path + '/grafana-password', '/config/grafana-password'); mount(path + '/datasources.json', '/etc/grafana/provisioning/datasources/bairui.yaml');
     mount(path + '/dashboards.json', '/etc/grafana/provisioning/dashboards/bairui.yaml'); mount(path + '/dashboard.json', '/etc/bairui/dashboards/platform.json');
+    mount(path + '/dashboard-host.json', '/etc/bairui/dashboards/host.json');
     mount(businessNames.grafanaVolume, '/var/lib/grafana', 'volume', false);
     for (const [key, value] of Object.entries(businessGrafanaEnvironment(gatewayIp, publicOrigin))) args.push('--env', key + '=' + value);
   } else {

@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, readdir, rm, stat, open } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, readdir, rm, stat, open, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { businessNames, businessKinds, businessVolumes, businessLabel, businessAssets } from './business-monitoring-config.mjs';
+import { businessNames, businessKinds, businessVolumes, businessLabel, businessAssets, businessConnector } from './business-monitoring-config.mjs';
 const module = await import('./business-monitoring.mjs').catch(() => ({}));
 const installation = 'a'.repeat(24);
 
@@ -48,6 +48,92 @@ test('installed credential and generated asset loss are refused', async () => {
     await assert.rejects(module.assertBusinessResources(f.state, f.deps), /business_private_file_missing/);
     assert.equal(f.commands.length, 0);
   }
+});
+
+async function legacyAssetFixture(t) {
+  const f = fixture();
+  const directory = await mkdtemp(join(tmpdir(), 'bairui-business-legacy-assets-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const files = { ...businessAssets(), 'caddy.json': {}, 'connector.json': businessConnector(installation, directory) };
+  delete files['dashboard-host.json'];
+  for (const [name, value] of Object.entries(files)) await writeFile(join(directory, name), JSON.stringify(value, null, 2) + '\n');
+  for (const name of ['bridge-token', 'metrics-token', 'grafana-password']) await writeFile(join(directory, name), 'c'.repeat(64));
+  f.deps.directory = directory;
+  f.deps.readFile = path => readFile(path, 'utf8');
+  return { ...f, directory, legacyFiles: await readdir(directory) };
+}
+
+test('legacy asset preflight explicitly marks only the new missing host dashboard and does not write files or alter identity', async t => {
+  const f = await legacyAssetFixture(t), state = structuredClone(f.state), records = structuredClone(f.records);
+  const found = await module.assertBusinessResources(f.state, f.deps);
+  assert.equal(found.missingHostDashboard, true);
+  assert.deepEqual(f.state, state);
+  assert.deepEqual(f.records, records);
+  assert.deepEqual(await readdir(f.directory), f.legacyFiles);
+  assert.equal(f.commands.length, 0);
+  await module.stopBusinessMonitoring(f.state, f.deps);
+  assert.deepEqual(f.commands, businessKinds.map(kind => ['stop', '--time', '20', kind + '-id']));
+  assert.equal(f.state.assetsSchemaVersion, undefined, 'stop must not claim an asset upgrade');
+  assert.deepEqual(f.records, records);
+  assert.deepEqual(await readdir(f.directory), f.legacyFiles, 'stop must not create the missing dashboard');
+  for (const name of ['bridge-token', 'metrics-token', 'grafana-password']) assert.equal(await readFile(join(f.directory, name), 'utf8'), 'c'.repeat(64));
+});
+
+test('current asset schema still refuses a missing host dashboard and unknown schemas fail closed', async t => {
+  const f = await legacyAssetFixture(t);
+  f.state.assetsSchemaVersion = 2;
+  await assert.rejects(module.assertBusinessResources(f.state, f.deps), /business_private_file_missing:dashboard-host.json/);
+  for (const value of [0, 3, '1', null]) {
+    f.state.assetsSchemaVersion = value;
+    await assert.rejects(module.assertBusinessResources(f.state, f.deps), /business_state_invalid/);
+  }
+  assert.equal(f.commands.length, 0);
+});
+
+test('legacy host migration never forgives permissions or missing original assets, connector, credentials or persistent volumes', async t => {
+  const f = await legacyAssetFixture(t), read = f.deps.readFile;
+  for (const code of ['EACCES', 'EPERM', 'EISDIR']) {
+    f.deps.readFile = path => path.endsWith('dashboard-host.json') ? Promise.reject(Object.assign(new Error(code), { code })) : read(path);
+    await assert.rejects(module.assertBusinessResources(f.state, f.deps), /business_private_file_missing:dashboard-host.json/);
+  }
+  for (const missing of f.legacyFiles) {
+    f.deps.readFile = path => path.endsWith(missing) ? Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' })) : read(path);
+    await assert.rejects(module.assertBusinessResources(f.state, f.deps), /business_private_file_missing/);
+  }
+  f.deps.readFile = read;
+  f.records.delete('volume:' + businessNames.grafanaVolume);
+  await assert.rejects(module.assertBusinessResources(f.state, f.deps), /business_persistent_resource_missing/);
+  assert.equal(f.commands.length, 0);
+});
+
+test('legacy host dashboard is created only by validated atomic asset publication and then becomes required', async t => {
+  const f = await legacyAssetFixture(t), before = new Map(await Promise.all(f.legacyFiles.map(async name => [name, await readFile(join(f.directory, name), 'utf8')])));
+  const runtimeTokenFiles = { business: join(f.directory, 'runtime-business-token'), preprod: join(f.directory, 'runtime-preprod-token') };
+  const records = structuredClone(f.records);
+  const deps = { ...f.deps, beforePublish: async () => {} };
+  deps.docker = async () => {
+    for (const [name, value] of before) assert.equal(await readFile(join(f.directory, name), 'utf8'), value);
+    await assert.rejects(readFile(join(f.directory, 'dashboard-host.json')), { code: 'ENOENT' });
+    throw new Error('legacy_validator_rejected');
+  };
+  await assert.rejects(module.writeAssets(f.state, runtimeTokenFiles, deps), /legacy_validator_rejected/);
+  assert.equal(f.state.assetsSchemaVersion, undefined);
+  assert.deepEqual(await readdir(f.directory), f.legacyFiles);
+  let validated = 0;
+  deps.docker = async () => {
+    validated++;
+    await assert.rejects(readFile(join(f.directory, 'dashboard-host.json')), { code: 'ENOENT' });
+    assert.equal(f.state.assetsSchemaVersion, undefined);
+  };
+  deps.beforePublish = async () => { assert.equal(validated, 3); };
+  await module.writeAssets(f.state, runtimeTokenFiles, deps);
+  assert.equal(f.state.assetsSchemaVersion, 2);
+  assert.equal(f.state.assetsPendingReconcile, true);
+  assert.equal(JSON.parse(await readFile(join(f.directory, 'dashboard-host.json'), 'utf8')).uid, 'bairui-host');
+  assert.deepEqual(f.records, records, 'asset publication cannot replace volumes or container identities');
+  for (const name of ['bridge-token', 'metrics-token', 'grafana-password']) assert.equal(await readFile(join(f.directory, name), 'utf8'), before.get(name));
+  await unlink(join(f.directory, 'dashboard-host.json'));
+  await assert.rejects(module.assertBusinessResources(f.state, f.deps), /business_private_file_missing:dashboard-host.json/);
 });
 
 test('installed bridge must remain dedicated outbound-capable bridge', async () => {

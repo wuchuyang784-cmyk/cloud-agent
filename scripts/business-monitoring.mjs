@@ -19,6 +19,9 @@ export const businessOutput = join(root, 'output', 'business-monitoring');
 export const businessPaths = Object.freeze({ state: join(businessOutput, 'state.json'), connector: join(businessOutput, 'connector.json') });
 const exec = promisify(execFile);
 const privateAssets = () => [...Object.keys(businessAssets()), 'caddy.json', 'connector.json'];
+// Schema 1 installations predate the additive host dashboard. Only this generated
+// file may be absent during their first upgrade; published schema 2 requires it.
+const assetsSchemaVersion = 2;
 
 async function boundedRead(path, limit = 1024 * 1024) {
   const handle = await open(path, 'r');
@@ -40,6 +43,7 @@ function validateState(state) {
   if (state.phase !== 'initializing') assert.ok(state.credentialsReady && state.assetsReady && state.resourcesReady, 'business_state_invalid');
   if (state.revision !== undefined) assert.match(state.revision, /^[a-f0-9]{16}$/, 'business_state_invalid');
   if (state.assetsPendingReconcile !== undefined) assert.equal(typeof state.assetsPendingReconcile, 'boolean', 'business_state_invalid');
+  if (state.assetsSchemaVersion !== undefined) assert.ok([1, assetsSchemaVersion].includes(state.assetsSchemaVersion), 'business_state_invalid');
 }
 
 export async function loadBusinessState() {
@@ -103,7 +107,14 @@ export async function assertBusinessResources(state, overrides) {
   }
   if (state?.assetsReady || state?.resourcesReady) for (const name of privateAssets()) {
     let value;
-    try { value = await deps.readFile(join(deps.directory, name)); } catch { throw new Error('business_private_file_missing:' + name); }
+    try { value = await deps.readFile(join(deps.directory, name)); }
+    catch (error) {
+      if (name === 'dashboard-host.json' && error.code === 'ENOENT' && (state.assetsSchemaVersion ?? 1) === 1) {
+        found.missingHostDashboard = true;
+        continue;
+      }
+      throw new Error('business_private_file_missing:' + name);
+    }
     if (name === 'connector.json') {
       try { assert.deepEqual(JSON.parse(value), businessConnector(state.installation, deps.directory, state.publicOrigin)); }
       catch { throw new Error('business_connector_invalid'); }
@@ -222,7 +233,7 @@ export async function writeAssets(state, runtimeTokenFiles, overrides) {
       }
       for (const name of changes) await rename(join(staged, name), join(deps.directory, name));
     }
-    state.assetsReady = true; await deps.save(state);
+    state.assetsReady = true; state.assetsSchemaVersion = assetsSchemaVersion; await deps.save(state);
   } finally {
     assert.equal(dirname(resolve(staged)), resolve(deps.directory), 'business_staging_directory_invalid');
     await rm(staged, { recursive: true, force: true });
@@ -246,7 +257,7 @@ export async function businessUp() {
     const entries = await readdir(businessOutput);
     assert.ok(entries.every(name => name === 'operation.lock'), 'business_unrecorded_private_files');
     state = { version: 1, installation: randomBytes(12).toString('hex'), phase: 'initializing', endpoint: context.local.endpoint, nodeId: context.local.nodeId,
-      createdAt: new Date().toISOString(), credentialsReady: false, assetsReady: false, resourcesReady: false, publicOrigin };
+      createdAt: new Date().toISOString(), credentialsReady: false, assetsReady: false, resourcesReady: false, assetsSchemaVersion, publicOrigin };
     await saveBusinessState(state);
     for (const name of businessCredentials) await writeFile(join(businessOutput, name), randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' });
     state.credentialsReady = true; await saveBusinessState(state);

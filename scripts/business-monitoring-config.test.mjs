@@ -89,6 +89,19 @@ test('Grafana uses exact live bridge IP, subpath and no login token', () => {
   for (const bad of ['127.0.0.1', '172.28.0.0/16', '', '0.0.0.0']) assert.throws(() => module.businessGrafanaEnvironment(bad));
 });
 
+test('business Grafana mounts both fixed provisioned dashboards read-only without replacing platform identity', () => {
+  const files = module.businessAssets();
+  assert.equal(files['dashboard-host.json'].uid, 'bairui-host');
+  assert.equal(files['dashboard.json'].uid, 'bairui-platform');
+  assert.equal(files['dashboard.json'].panels.length, 17);
+  const args = module.businessContainerArguments('grafana', input);
+  const mounts = args.filter((_, index) => args[index - 1] === '--mount');
+  for (const [source, target] of [['dashboard.json', 'platform.json'], ['dashboard-host.json', 'host.json']]) {
+    assert.ok(mounts.includes(`type=bind,source=${input.directory}/${source},target=/etc/bairui/dashboards/${target},readonly`), source);
+  }
+  for (const kind of ['prometheus', 'caddy']) assert.ok(!module.businessContainerArguments(kind, input).join(' ').includes('dashboard-host.json'));
+});
+
 test('input validation rejects unknown containers, unsafe bind paths and ownership', () => {
   assert.equal(typeof module.assertBusinessOwned, 'function');
   module.assertBusinessOwned({ [module.businessLabel]: input.installation }, input.installation);

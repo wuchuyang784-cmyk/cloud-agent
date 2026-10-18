@@ -21,6 +21,14 @@
 
 ## 项目定位
 
+### M1：管理端原生 Linux 整机监控（2026-10-18，代码与隔离实采；未常驻部署）
+
+- 接入说明以 `docs/56-m1-host-monitoring.md` 为准。管理端运行监控新增「平台运行 / 主机资源」固定切换；同源 `/api/admin/grafana/`、逐次 active 平台会话/角色检查、固定 UID/PromQL 保留，不新增公网监控入口。原平台 12 面板和业务 17 面板不替换；新增主机 24 面板不表示 Agent 已运行。
+- 官方 digest 固定 Node Exporter 读取原生 Linux host PID/network/只读 rootfs，仅回环19100；独立采样器写自有缓存卷，内网只读 bridge 提供9100（不发布），原监控网络保持 internal。失败/未来/超过45秒样本返回503，实时资源表达式同时要求 up1 和有效采样时间，不补零。
+- 显式 `npm run monitor:host -- up|status|stop`（参数选择其一），复用预发安装锁与归属校验、不读业务 `.env`。默认不启用；普通监控停启保留 enabled/卷/历史，显式 host stop 关闭 opt-in且不唤起已停止监控。内核>=5.12、根shared/slave门禁，启动后实检完整/host子树ro；Docker Desktop拒绝managed部署，不能冒充物理宿主机。
+- 旧业务资产schema1仅允许新增host看板ENOENT进入显式up升级，验证并原子发布后标记schema2；原文件/Secret/卷缺失及权限错误仍拒绝，status/stop不生成新文件。无数据库迁移、无容器/用户Agent/Token/费用计量，不改变执行能力开关。
+- 原生Linux随机隔离实采9项及清理通过，报告 `output/m1-native/2026-10-18T06-10-41-093Z-1de553de/report.json`：MemTotal与宿主精确一致、24固定查询、exporter故障/恢复、sampler真实45.486秒失效及21资源查询为空；8既有运行容器full ID未变。浏览器使用临时认证fixture覆盖12+24面板、切换/刷新与1440/390/320px，不等同于云端真实账号的新版本常驻上线。原常驻服务未更新，本机临时资源已清理。
+
 ### 管理端同源监控（2026-10-15，代码开发；未部署）
 
 - 本批以 `docs/51-single-origin-admin-monitoring.md` 为准：业务与预发均从 `/admin/` 内嵌固定 `/api/admin/grafana/` 子路径；删除独立打开按钮和 9443 回退，预发不再发布独立 Grafana 端口或应急登录入口。下方历史部署记录保留，不代表当前环境已更新。
