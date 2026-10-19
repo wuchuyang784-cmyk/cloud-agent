@@ -4,6 +4,9 @@
   "private": true,
   "description": "BaiRui Cloud Agent Platform 根目录脚本：一键启动本地开发环境",
   "scripts": {
+    "model:gateway": "node apps/platform-api/src/model-access/gateway-entry.mjs",
+    "test:model-access": "node --test apps/platform-api/test/model-access-*.test.mjs",
+    "test:model-access:db": "node scripts/test-model-access.mjs",
     "monitor:host": "node scripts/host-monitoring.mjs",
     "test:monitoring:host": "node --test scripts/host-monitoring-config.test.mjs scripts/host-monitoring.test.mjs scripts/host-monitoring-native-acceptance.test.mjs apps/platform-api/test/host-metrics-bridge.test.mjs apps/platform-api/test/host-monitoring.test.mjs",
     "announcements:publisher": "node apps/platform-api/src/announcements/publisher-entry.mjs",

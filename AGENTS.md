@@ -21,6 +21,14 @@
 
 ## 项目定位
 
+### F2：本人凭据保险库与私有模型网关（2026-10-18，代码与隔离验收；未部署）
+
+- 接入以 `docs/57-f2-model-access.md` 为准。`model-access/` 独立模块和 046 迁移：API 仅公钥信封加密，独立网关私钥环解密；本人凭据元数据接口默认 404，显式 opt-in，复用 Better Auth/Principal，不给管理员跨本人特权。
+- API、机器 issuer、gateway 使用分离函数权限；四表 FORCE RLS，撤销含 TRUNCATE 的默认直表授权，迁移重跑保留明确函数 GRANT 与历史。随机短期令牌只存哈希，绑定所有权/凭据版本/run/generation/governance/model；DB 原子预扣额度、跨 grant/副本单 run 并发、125 秒过期占位 unknown，不自动退款或重放。
+- 独立 `npm run model:gateway` 只读显式私有配置，TLS、固定 HTTPS Provider/catalog、DNS 全地址校验及本次 IP 钉住，不跟随重定向/环境代理。SSE/请求/并发/时限有界，成功终止帧要先确认回执持久化；Token 只取合法最终报告，缺失/重复/中间报告为 null，不执行费用估算或扣款。
+- 专项 `npm run test:model-access`；`test:model-access:db` 使用一次性受限 PostgreSQL 与 HTTPS fixture，精确清理，不读业务 `.env`。未操作云服务器、业务库、常驻服务或真实付费 Key；不增加 Grafana Token/费用聚合。
+- 仍不开放真实用户 Agent 创建/执行，不改 E2 probe/默认启动链。当前 F1 源码固定与 53 项测试通过，但本机只有旧 pi 镜像，当前镜像构建受 Docker Hub frontend token 网络失败阻碍；本轮没有当前真实 pi 容器到 F2 的联调，不拿模拟工具协议或旧镜像冒充。F3 沙箱、F4 真实生命周期/签发/容量、F5 UI 仍为后续任务。
+
 ### M1：管理端原生 Linux 整机监控（2026-10-18，代码与隔离实采；未常驻部署）
 
 - 接入说明以 `docs/56-m1-host-monitoring.md` 为准。管理端运行监控新增「平台运行 / 主机资源」固定切换；同源 `/api/admin/grafana/`、逐次 active 平台会话/角色检查、固定 UID/PromQL 保留，不新增公网监控入口。原平台 12 面板和业务 17 面板不替换；新增主机 24 面板不表示 Agent 已运行。

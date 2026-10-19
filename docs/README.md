@@ -6,6 +6,8 @@
 
 原生 Linux 整机指标、24 个主机面板及后续部署验收：[56-m1-host-monitoring.md](56-m1-host-monitoring.md)。M1 已开发并完成隔离实采验证，不等于常驻服务器已升级，不包含容器/用户 Agent/Token 计费监控。
 
+F2 本人加密凭据、运行范围授权与独立模型网关：[57-f2-model-access.md](57-f2-model-access.md)。默认关闭，未部署；不开放真实用户 Agent 执行，当前 pi 容器实链路补验仍受镜像构建网络阻碍。
+
 ## 跨仓权威入口
 
 - 整体执行顺序：`BaiRui-agent/docs/AI-DEVELOPMENT-PLAN.md`

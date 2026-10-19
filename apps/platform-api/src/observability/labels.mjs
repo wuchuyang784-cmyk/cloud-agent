@@ -12,8 +12,10 @@ const fixedRoutes = new Set([
   '/api/user/account', '/api/user/billing/transactions', '/api/user/billing/recharge',
   '/api/user/filings',
   '/api/user/monitoring/agents',
+  '/api/user/model-credentials',
 ]);
 const dynamicRoutes = [
+  [/^\/api\/user\/model-credentials\/[^/]+$/, '/api/user/model-credentials/:credentialId'],
   [/^\/api\/user\/announcements\/[^/]+$/, '/api/user/announcements/:announcementId'],
   [/^\/api\/user\/announcements\/[^/]+\/read$/, '/api/user/announcements/:announcementId/read'],
   [/^\/api\/admin\/announcements\/[^/]+$/, '/api/admin/announcements/:announcementId'],

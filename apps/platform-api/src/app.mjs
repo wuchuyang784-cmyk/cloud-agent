@@ -16,6 +16,8 @@ import { createGrafanaProxy } from './admin/grafana-proxy.mjs';
 import { handleClientMonitoring } from './monitoring/client-routes.mjs';
 import { handleNotificationCenter } from './announcements/user-routes.mjs';
 import { accountAccess, GovernanceError } from './admin/governance.mjs';
+import { readCredentialConfiguration, validateCredentialConfiguration } from './model-access/config.mjs';
+import { createModelCredentialHandler, isModelCredentialPath } from './model-access/user-routes.mjs';
 
 function sendJson(response, status, body, headers = {}) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
@@ -83,6 +85,9 @@ export const MIN_PASSWORD_LENGTH = 8;
 
 export function createApp(options = {}) {
   const env = options.env ?? process.env;
+  if (options.modelCredentials !== undefined && env.NODE_ENV !== 'test') throw new Error('model_access_configuration_invalid');
+  const modelCredentialConfiguration = options.modelCredentials && env.BAIRUI_MODEL_CREDENTIALS_ENABLED === '1'
+    ? validateCredentialConfiguration(options.modelCredentials.configuration) : readCredentialConfiguration(env);
   if ((env.BAIRUI_MONITORING_SCOPE !== undefined && !['business', 'preprod'].includes(env.BAIRUI_MONITORING_SCOPE))
     || (env.BAIRUI_GRAFANA_AUTH_MODE === 'session' && env.BAIRUI_MONITORING_SCOPE !== 'preprod')) throw new Error('invalid_monitoring_scope');
   const capabilities = platformCapabilities(env);
@@ -146,6 +151,8 @@ export function createApp(options = {}) {
   if (capabilities.mode === 'platform' && !injectedTest && (!(store instanceof PostgresStore) || auth.provider !== 'better-auth')) {
     throw new Error('Platform mode requires PostgreSQL and Better Auth');
   }
+  const modelCredentials = createModelCredentialHandler({ env, configuration: modelCredentialConfiguration,
+    platformStore: store, authProvider: auth.provider, mode: capabilities.mode, injectedStore: options.modelCredentials?.store });
   const runtimeResolver = capabilities.agentExecution ? createRuntimeResolver({ env, runtimeOptions: options.runtimeOptions }) : null;
   // 全局 fallback runtime（options.runtime 注入用于测试与旧调用路径）。
   const runtime = capabilities.agentExecution ? (options.runtime ?? runtimeResolver.resolve(options.engineKind ?? 'mock').runtime) : null;
@@ -173,7 +180,8 @@ export function createApp(options = {}) {
       const url = new URL(request.url, 'http://platform.local');
       const path = url.pathname;
       if (path.startsWith('/api/admin/') || path.startsWith('/api/user/monitoring/')
-        || /^\/api\/user\/(?:announcements|notifications)(?:\/|$)/.test(path)) response.setHeader('cache-control', 'no-store');
+        || isModelCredentialPath(path) || /^\/api\/user\/(?:announcements|notifications)(?:\/|$)/.test(path)) response.setHeader('cache-control', 'no-store');
+      if (isModelCredentialPath(path) && !modelCredentials) return sendError(response, 404, 'not_found', 'Not found', requestId);
       if (request.method === 'GET' && ['/livez', '/readyz', '/healthz'].includes(path)) {
         response.setHeader('cache-control', 'no-store');
         if (path === '/livez') return sendJson(response, 200, { status: 'ok' });
@@ -256,6 +264,10 @@ export function createApp(options = {}) {
           enabled: capabilities.mode === 'platform' && auth.provider === 'better-auth', sendJson, sendError, requestId, env, readJson, monitoring: adminMonitoring, grafana });
       }
       if (!principal) return sendError(response, 401, 'unauthenticated', 'Authentication required', requestId);
+
+      if (isModelCredentialPath(path)) {
+        return await modelCredentials({ request, response, url, principal, scope, sendJson, sendError, requestId });
+      }
 
       if (/^\/api\/user\/(?:announcements|notifications)(?:\/|$)/.test(path)) {
         return await handleNotificationCenter({ request, response, url, scope, store, env, strictOrigin: auth.provider === 'better-auth', sendJson, sendError, requestId });
