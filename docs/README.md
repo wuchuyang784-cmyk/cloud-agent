@@ -8,6 +8,8 @@
 
 F2 本人加密凭据、运行范围授权与独立模型网关：[57-f2-model-access.md](57-f2-model-access.md)。默认关闭，未部署；不开放真实用户 Agent 执行，当前 pi 容器实链路补验仍受镜像构建网络阻碍。
 
+F3-A 独立 pi 沙箱协议底座与只读配置检查：[58-f3-pi-sandbox.md](58-f3-pi-sandbox.md)。双容器策略、可信状态、RPC 与固定模型中转不等于 F3-B 原生 runsc/硬配额/实际生命周期验收；不开放用户创建执行，不加入默认启动链。
+
 ## 跨仓权威入口
 
 - 整体执行顺序：`BaiRui-agent/docs/AI-DEVELOPMENT-PLAN.md`

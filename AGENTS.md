@@ -21,6 +21,15 @@
 
 ## 项目定位
 
+### F3-A：独立 pi 沙箱协议底座（2026-10-20，组件验证；未部署）
+
+- 详细设计与接入边界见 `docs/58-f3-pi-sandbox.md`、`docs/superpowers/specs/2026-10-20-f3-pi-sandbox-design.md`。用户确认每 Agent 独立可信控制容器与 pi 执行沙箱；首批工具 network=none，仅允许受控模型调用，不开放 git clone/联网安装包/外部 MCP。
+- 独立 `runtime/pi/sandbox/` 提供严格机器 profile、纯双容器策略、受保护持久状态、UUID 去重与永久停止记录、有界 RPC 和固定 HTTPS F2 中转。策略要求 runsc、不回退，工作区与会话分别需要块/inode 硬配额；`trusted-gateway-only` 是待宿主执行的要求，不是可直接启动的 Docker 网络配置。
+- `npm run pi:sandbox:check -- --config <file>` 仅显式只读检查；`npm run test:pi:sandbox` 是组件专项。模块不加入 dev/API/E2/常驻预发，不修改平台能力开关、不读业务 `.env`，不提供用户执行或 Docker 权限。
+- F3-B 真实 pi connector/relay、UDS、runsc/挂载/硬配额/网络对抗与实际运行单元创建回收仍未交付；F4 签发续期/容量/治理/生命周期和 F5 用户 UI 后续验收。`confirmStopped` 仅接可信外部驱动的双容器缺席断言，组件与 fixture 通过不证明真实资源已回收。
+- 当前镜像构建仍受 Docker Hub frontend token 连接失败阻碍，本机没有 runsc；Linux临时组件容器不冒充原生宿主或真实 pi→F2 联调。本轮不操作云服务器、业务库或常驻服务，不自动提交推送。
+- 本机专项134通过/4个Linux或POSIX分支在Windows明确跳过，Linux组件state28/RPC49/CLI13另跑全部通过；后端601通过/19跳过。整批独立复核两处P2已修复并复验PASS；不把组件syscall/故障注入当宿主掉电或原生沙箱验收。
+
 ### F2：本人凭据保险库与私有模型网关（2026-10-18，代码与隔离验收；未部署）
 
 - 接入以 `docs/57-f2-model-access.md` 为准。`model-access/` 独立模块和 046 迁移：API 仅公钥信封加密，独立网关私钥环解密；本人凭据元数据接口默认 404，显式 opt-in，复用 Better Auth/Principal，不给管理员跨本人特权。

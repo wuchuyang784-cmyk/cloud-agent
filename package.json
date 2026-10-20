@@ -18,6 +18,8 @@
     "test:notifications:web": "node scripts/test-notification-center-browser.mjs",
     "test:notifications": "node --test apps/platform-api/test/notification-center.test.mjs apps/platform-api/test/notification-center-api.test.mjs",
     "pi:source:check": "node scripts/pi-runtime-build.mjs --check",
+    "pi:sandbox:check": "node scripts/pi-sandbox-check.mjs",
+    "test:pi:sandbox": "node --test apps/platform-api/test/pi-sandbox-*.test.mjs scripts/pi-sandbox-check.test.mjs",
     "pi:build": "node scripts/pi-runtime-build.mjs",
     "test:pi": "node --test scripts/pi-runtime-build.test.mjs scripts/pi-runtime-fixture.test.mjs apps/platform-api/test/pi-production*.test.mjs",
     "test:pi:live": "node scripts/test-pi-runtime-live.mjs",
