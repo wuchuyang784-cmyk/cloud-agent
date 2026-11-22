@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { MemoryStore } from './store.mjs';
 import { PostgresStore } from './postgres-store.mjs';
 import { createPrincipalResolver } from './auth/resolver.mjs';
+import { authEmailMode } from './auth/email-delivery.mjs';
 import { createRuntimeResolver } from './runtime/engines/registry.mjs';
 import { MemoryTaskStore, PostgresTaskStore, TaskError } from './scheduler/task-store.mjs';
 import { platformCapabilities, validatePlatformStartup, disabledCapability } from './platform-config.mjs';
@@ -151,6 +152,8 @@ export function createApp(options = {}) {
   if (capabilities.mode === 'platform' && !injectedTest && (!(store instanceof PostgresStore) || auth.provider !== 'better-auth')) {
     throw new Error('Platform mode requires PostgreSQL and Better Auth');
   }
+  const emailMode = authEmailMode(env);
+  if (emailMode !== 'off' && auth.emailMode !== emailMode) throw new Error('auth_email_configuration_invalid');
   const modelCredentials = createModelCredentialHandler({ env, configuration: modelCredentialConfiguration,
     platformStore: store, authProvider: auth.provider, mode: capabilities.mode, injectedStore: options.modelCredentials?.store });
   const runtimeResolver = capabilities.agentExecution ? createRuntimeResolver({ env, runtimeOptions: options.runtimeOptions }) : null;
@@ -165,7 +168,10 @@ export function createApp(options = {}) {
   if (simulationEnabled && !env.BETTER_AUTH_URL) throw new Error('Simulation API requires BETTER_AUTH_URL');
   const simulationUsers = new Set((env.BAIRUI_SIMULATION_USERS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
   const tasks = simulationEnabled ? (options.taskStore ?? (store instanceof PostgresStore ? new PostgresTaskStore(store.pool) : new MemoryTaskStore())) : null;
-  const ready = createReadiness(store, options.readinessTimeoutMs ?? 2000);
+  const ready = createReadiness(auth.email ? { ping: async () => {
+    await store.ping?.();
+    await auth.email.ready();
+  } } : store, options.readinessTimeoutMs ?? 2000);
   const telemetry = createTelemetry(metricsConfig, store, { readinessTimeoutMs: options.metricsReadinessTimeoutMs });
   const adminMonitoring = options.adminMonitoring ?? createAdminMonitoring({ baseUrl: env.BAIRUI_PROMETHEUS_URL, token: env.BAIRUI_MONITORING_PROXY_TOKEN });
   const grafana = createGrafanaProxy({ baseUrl: env.BAIRUI_GRAFANA_UPSTREAM_URL, token: env.BAIRUI_MONITORING_PROXY_TOKEN,
@@ -195,7 +201,7 @@ export function createApp(options = {}) {
         return sendError(response, 503, 'service_draining', 'Service draining', requestId);
       }
       if (request.method === 'GET' && path === '/api/auth/config') {
-        return sendJson(response, 200, { provider: auth.provider ?? 'local', capabilities }, { 'cache-control': 'no-store' });
+        return sendJson(response, 200, { provider: auth.provider ?? 'local', capabilities, emailMode }, { 'cache-control': 'no-store' });
       }
       if (auth.handle && path.startsWith('/api/auth/') && path !== '/api/auth/me') {
         return await auth.handle(request, response, path, maxBodyBytes);

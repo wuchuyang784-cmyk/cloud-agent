@@ -32,6 +32,49 @@ test('Better Auth registration supplies a name and maps provider errors', async 
   await assert.rejects(api.registerAccount({ email: 'a@example.test', password: 'short', displayName: 'Alice' }), error => error.code === 'PASSWORD_TOO_SHORT');
 });
 
+test('email mode defaults to off for older or unrecognized auth config', async t => {
+  for (const [configured, expected] of [[undefined, 'off'], ['unknown', 'off'], ['off', 'off'], ['transition', 'transition'], ['enforce', 'enforce']]) {
+    t.mock.method(globalThis, 'fetch', async (path, options) => {
+      assert.equal(path, '/api/auth/config');
+      assert.equal(options.cache, 'no-store');
+      return Response.json({ provider: 'better-auth', emailMode: configured });
+    });
+    assert.equal(await api.fetchEmailMode(), expected);
+  }
+});
+
+test('enforced registration requests verification without reading a session', async t => {
+  const paths = [];
+  t.mock.method(globalThis, 'fetch', async path => {
+    paths.push(path);
+    return Response.json(path.endsWith('/config') ? { provider: 'better-auth', emailMode: 'enforce' } : { token: null });
+  });
+  assert.equal(await api.registerAccount({ email: 'a@example.test', password: 'password-12345' }), null);
+  assert.deepEqual(paths, ['/api/auth/config', '/api/auth/sign-up/email']);
+});
+
+test('email request endpoints preserve a generic acceptance and avoid session-expired events', async t => {
+  const events = [];
+  globalThis.window = { dispatchEvent(event) { events.push(event.type); } };
+  t.after(() => { delete globalThis.window; });
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (path, init) => {
+    calls.push([path, init.method, JSON.parse(init.body)]);
+    return path.endsWith('/confirm') ? Response.json({}, { status: 401 }) : Response.json({ accepted: true }, { status: 202 });
+  });
+  await api.requestPasswordReset('a@example.test');
+  await api.requestEmailVerification();
+  await assert.rejects(api.confirmEmailVerification('A'.repeat(43)), { status: 401 });
+  await assert.rejects(api.confirmPasswordReset('A'.repeat(43), 'password-12345'), { status: 401 });
+  assert.deepEqual(calls, [
+    ['/api/auth/password-reset/request', 'POST', { email: 'a@example.test' }],
+    ['/api/auth/email-verification/request', 'POST', {}],
+    ['/api/auth/email-verification/confirm', 'POST', { token: 'A'.repeat(43) }],
+    ['/api/auth/password-reset/confirm', 'POST', { token: 'A'.repeat(43), newPassword: 'password-12345' }],
+  ]);
+  assert.deepEqual(events, []);
+});
+
 test('expired sessions notify the console and logout failures remain failures', async t => {
   let expired = 0;
   globalThis.window = { dispatchEvent(event) { if (event.type === 'bairui:session-expired') expired++; } };

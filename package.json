@@ -4,6 +4,9 @@
   "private": true,
   "description": "BaiRui Cloud Agent Platform 根目录脚本：一键启动本地开发环境",
   "scripts": {
+    "test:auth-email": "node --test apps/platform-api/test/auth-email.test.mjs",
+    "test:auth-email:db": "node scripts/test-auth-email.mjs",
+    "test:auth-email:web": "node scripts/test-auth-email.mjs --browser",
     "model:gateway": "node apps/platform-api/src/model-access/gateway-entry.mjs",
     "test:model-access": "node --test apps/platform-api/test/model-access-*.test.mjs",
     "test:model-access:db": "node scripts/test-model-access.mjs",

@@ -12,6 +12,8 @@ export interface PlatformCapabilities {
   simulatedRecharge: boolean;
 }
 
+export type EmailMode = 'off' | 'transition' | 'enforce';
+
 export const CLOSED_CAPABILITIES: PlatformCapabilities = Object.freeze({
   mode: 'platform', agentLifecycle: false, agentExecution: false, simulatedRecharge: false,
 });
@@ -31,6 +33,7 @@ export interface User {
   organizationId: string;
   role: string;
   email: string;
+  emailVerified?: boolean;
   organizations?: Organization[];
   accountStatus?: 'active' | 'suspended';
 }
@@ -161,7 +164,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 export type ApiError = Error & { status?: number; code?: string };
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, notifySession = true): Promise<T> {
   const response = await fetch(API_BASE + path, {
     ...init,
     credentials: 'include',
@@ -170,7 +173,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   init.signal?.throwIfAborted();
 
   if (!response.ok) {
-    if (response.status === 401 && typeof window !== 'undefined') {
+    if (notifySession && response.status === 401 && typeof window !== 'undefined') {
       window.dispatchEvent(new Event('bairui:session-expired'));
     }
     let message = String(response.status) + ' ' + response.statusText;
@@ -184,7 +187,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     if (code === 'account_suspended') {
       message = '账号服务已暂停，当前仅可查看本人历史数据。';
-      if (typeof window !== 'undefined') window.dispatchEvent(new Event('bairui:account-refresh'));
+      if (notifySession && typeof window !== 'undefined') window.dispatchEvent(new Event('bairui:account-refresh'));
     }
     if (code === 'account_banned') message = '账号已封禁，请联系平台管理员。';
     if (code === 'governance_unavailable') message = '账号权限暂时无法确认，请稍后重试。';
@@ -266,17 +269,23 @@ export async function loginAccount(email: string, password: string): Promise<Use
   ).user;
 }
 
+export async function fetchEmailMode(signal?: AbortSignal): Promise<EmailMode> {
+  const { emailMode } = await request<{ emailMode?: unknown }>('/api/auth/config', { signal, cache: 'no-store' }, false);
+  return emailMode === 'transition' || emailMode === 'enforce' ? emailMode : 'off';
+}
+
 export async function registerAccount(input: {
   email: string;
   password: string;
   displayName?: string;
-}): Promise<User> {
-  const config = await request<{ provider: string }>('/api/auth/config');
+}): Promise<User | null> {
+  const config = await request<{ provider: string; emailMode?: EmailMode }>('/api/auth/config', { cache: 'no-store' });
   if (config.provider === 'better-auth') {
     await request('/api/auth/sign-up/email', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: input.email, password: input.password, name: input.displayName || input.email.split('@')[0] }),
     });
+    if (config.emailMode === 'enforce') return null;
     return (await request<{ user: User }>('/api/auth/me')).user;
   }
   return (
@@ -286,6 +295,30 @@ export async function registerAccount(input: {
       body: JSON.stringify(input),
     })
   ).user;
+}
+
+function postAuthEmail(path: string, body: Record<string, string>, headers: Record<string, string> = {}): Promise<{ ok?: boolean }> {
+  return request('/api/auth/' + path, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body), cache: 'no-store',
+  }, false);
+}
+
+export async function requestPasswordReset(email: string): Promise<void> {
+  await postAuthEmail('password-reset/request', { email });
+}
+
+export async function requestEmailVerification(expectedUserId: string): Promise<void> {
+  await postAuthEmail('email-verification/request', {}, { 'x-bairui-expected-user': expectedUserId });
+}
+
+export async function confirmEmailVerification(token: string): Promise<void> {
+  const result = await postAuthEmail('email-verification/confirm', { token });
+  if (result?.ok !== true) throw new Error('Email verification result is unavailable');
+}
+
+export async function confirmPasswordReset(token: string, newPassword: string): Promise<void> {
+  const result = await postAuthEmail('password-reset/confirm', { token, newPassword });
+  if (result?.ok !== true) throw new Error('Password reset result is unavailable');
 }
 
 export async function logoutAccount(): Promise<void> {

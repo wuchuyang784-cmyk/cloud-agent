@@ -3,8 +3,9 @@ import type { FormEvent, ReactNode } from 'react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { CLOSED_CAPABILITIES, fetchCapabilities, type PlatformCapabilities, addFavorite, createAgent, createFiling, createResource, createSession, deleteResource, fetchAccount, fetchAgents, fetchCurrentUser, fetchFavorites, fetchFilings, fetchHealth, fetchResource, fetchResources, fetchSettings, fetchTransactions, fetchUsage, logoutAccount, rechargeAccount, removeFavorite, streamChat, updateResource, updateSettings, type AccountInfo, type BackendAgent, type BackendResource, type BillingTransaction, type FavoriteItem, type FilingRecord, type ResourceDetail, type ResourceKind, type Session, type UsagePayload, type User, type UserSettings } from './api';
 import { LoginPage } from './LoginPage';
+import { EmailVerificationSetting } from './EmailVerificationSetting';
 import { ClientMonitoring } from './ClientMonitoring';
-import { notificationRequest } from './api';
+import { fetchEmailMode, notificationRequest, type EmailMode } from './api';
 import { NotificationSession, watchNotifications } from './notification-state';
 import { NotificationBell, NotificationCenter, NotificationPopover, NotificationDetail } from './NotificationCenter';
 
@@ -33,8 +34,16 @@ const RESOURCE_KIND_ICON = { knowledge_base: BookOpen, skill: Sparkles, tool: Wr
 const CapabilitiesContext = createContext<PlatformCapabilities>(CLOSED_CAPABILITIES);
 const capabilityNotice = '当前未开放 Agent 执行与充值';
 
-export function App() {
+export function App({ signIn }: { signIn?: { notice?: string } }) {
   const [capabilities, setCapabilities] = useState(CLOSED_CAPABILITIES);
+  const [emailMode, setEmailMode] = useState<EmailMode | null>(null);
+  const [emailConfigError, setEmailConfigError] = useState(false);
+  const [emailConfigAttempt, setEmailConfigAttempt] = useState(0);
+  const [signInNotice, setSignInNotice] = useState(signIn?.notice);
+  const retryEmailConfig = () => {
+    setEmailConfigError(false);
+    setEmailConfigAttempt(attempt => attempt + 1);
+  };
   const [user, setUser] = useState<User | null>(null);
   const [agents, setAgents] = useState<BackendAgent[]>([]);
   const [resources, setResources] = useState<BackendResource[]>([]);
@@ -56,7 +65,7 @@ export function App() {
   const [resourceDetail, setResourceDetail] = useState<ResourceDetail | null>(null);
   const [resourceBusy, setResourceBusy] = useState(false);
   const [health, setHealth] = useState<'postgres' | 'memory' | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!signIn);
   const [refreshing, setRefreshing] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -153,13 +162,25 @@ export function App() {
     finally { if (isCurrent()) setRefreshing(false); }
   }, [notices]);
   useEffect(() => {
+    const controller = new AbortController();
+    void fetchEmailMode(AbortSignal.any([controller.signal, AbortSignal.timeout(10000)])).then(mode => {
+      if (!controller.signal.aborted) { setEmailMode(mode); setEmailConfigError(false); }
+    }).catch(() => { if (!controller.signal.aborted) setEmailConfigError(true); });
+    return () => controller.abort();
+  }, [emailConfigAttempt, user?.userId]);
+  useEffect(() => {
     let cancelled = false;
-    void (async () => { try { const current = await fetchCurrentUser(); if (!cancelled) { setUser(current); if (current) await refresh(); } } catch (caught) { if (!cancelled) setError(caught instanceof Error ? caught.message : '无法连接平台 API'); } finally { if (!cancelled) setLoading(false); } })();
+    if (!signIn) void (async () => { try { const current = await fetchCurrentUser(); if (!cancelled) { setUser(current); if (current) await refresh(); } } catch (caught) { if (!cancelled) setError(caught instanceof Error ? caught.message : '无法连接平台 API'); } finally { if (!cancelled) setLoading(false); } })();
     void fetchHealth().then(({ database }) => { if (!cancelled) setHealth(database === 'postgres' ? 'postgres' : 'memory'); }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [refresh]);
+  }, [refresh, signIn]);
   useEffect(() => { if (!capabilities.agentExecution || !agents.some((item) => item.status === 'provisioning')) return undefined; const timer = window.setInterval(() => void refresh(), 2000); return () => window.clearInterval(timer); }, [agents, refresh, capabilities.agentExecution]);
-  const handleAuthenticated = useCallback(async (next: User) => { clearUserSession(); setUser(next); await refresh(); }, [refresh, clearUserSession]);
+  const handleAuthenticated = useCallback(async (next: User) => {
+    setSignInNotice(undefined);
+    clearUserSession();
+    setUser(next);
+    await refresh();
+  }, [refresh, clearUserSession]);
   async function handleLogout() {
     notices.reset(); setNoticeOpen(false);
     if (logoutPending.current) return;
@@ -244,7 +265,13 @@ export function App() {
     void notices.refresh();
   }
   if (loading) return <div className="console-loading"><LoaderCircle className="spin" /><span>正在连接 BaiRui 控制台...</span></div>;
-  if (!user) return <LoginPage onAuthenticated={(next) => void handleAuthenticated(next)} />;
+  if (!user) return <LoginPage emailMode={emailMode} initialNotice={signInNotice}
+    retryEmailConfig={emailConfigError ? retryEmailConfig : undefined} onAuthenticated={(next) => void handleAuthenticated(next)} />;
+  const emailVerification = emailConfigError
+    ? <div><p role="alert">暂时无法读取邮箱认证配置。</p><button type="button" className="button secondary" onClick={retryEmailConfig}>重试认证配置</button></div>
+    : emailMode && emailMode !== 'off' && typeof user.emailVerified === 'boolean'
+    ? <EmailVerificationSetting key={user.userId} userId={user.userId} verified={user.emailVerified} canRequest={emailMode === 'transition'} />
+    : null;
   return <CapabilitiesContext.Provider value={capabilities}><div className="console-app">
     {user.accountStatus === 'suspended' && <div className="account-restriction" role="status"><ShieldCheck size={18} /><span>账号服务已暂停，当前仅可查看本人历史数据。请联系支持人员处理。</span></div>}
     <header className="console-topbar">
@@ -272,7 +299,7 @@ export function App() {
     </header>
     <div className="console-layout"><aside className="console-sidebar"><div className="sidebar-group"><div className="sidebar-section-label">工作台</div><Nav active={panel === 'overview'} icon={<LayoutDashboard />} onClick={() => setPanel('overview')}>总览</Nav><Nav active={panel === 'agents'} icon={<Bot />} onClick={() => { setAgentsEntry('templates'); setPanel('agents'); }}>智能体 Agents <span className="sidebar-count">{agents.length}</span></Nav><Nav active={panel === 'conversations' || panel === 'chat'} icon={<MessageSquare />} onClick={() => setPanel(session ? 'chat' : 'conversations')}>会话管理</Nav></div><div className="sidebar-group"><div className="sidebar-section-label">开发与部署</div><Nav active={panel === 'deploy'} icon={<Zap />} onClick={() => setPanel('deploy')}>部署发布</Nav><Nav active={panel === 'control'} icon={<Settings2 />} onClick={() => setPanel('control')}>运维控制</Nav><Nav active={panel === 'approvals'} icon={<FileCheck2 />} onClick={() => setPanel('approvals')}>审批中心</Nav><Nav active={panel === 'observability'} icon={<BarChart3 />} onClick={() => setPanel('observability')}>可观测</Nav></div><div className="sidebar-group"><Nav active={panel === 'library'} icon={<LibraryBig />} onClick={() => setPanel('library')}>资源库 <span className="sidebar-count">{resources.length}</span></Nav><Nav sub active={panel === 'library-knowledge_base'} icon={<BookOpen />} onClick={() => setPanel('library-knowledge_base')}>知识库 <span className="sidebar-count">{resourceCounts.knowledge_base}</span></Nav><Nav sub active={panel === 'library-skill'} icon={<Sparkles />} onClick={() => setPanel('library-skill')}>Skill <span className="sidebar-count">{resourceCounts.skill}</span></Nav><Nav sub active={panel === 'library-tool'} icon={<Wrench />} onClick={() => setPanel('library-tool')}>工具 <span className="sidebar-count">{resourceCounts.tool}</span></Nav><Nav sub active={panel === 'library-plugin'} icon={<Puzzle />} onClick={() => setPanel('library-plugin')}>插件 <span className="sidebar-count">{resourceCounts.plugin}</span></Nav></div></aside>
       <main className="console-main">{error && <div className="console-alert"><CircleAlert /><span>{error}</span><button className="icon-button" title="关闭提示" aria-label="关闭提示" onClick={() => setError(null)}><X /></button></div>}{panel === 'overview' && <Overview agents={agents} usage={usage} onCreate={() => setModal(true)} onAgents={() => setPanel('agents')} onChat={openChat} />}{panel.startsWith('library') && <ResourceLibrary initialTab={panel === 'library' ? 'all' : panel.replace('library-', '') as ResourceTab} resources={resources} favorites={favorites} onRefresh={() => void refresh()} onCreate={() => { setResourceKind(panel === 'library' ? 'knowledge_base' : panel.replace('library-', '') as ResourceKind); setResourceModal(true); }} onToggleStatus={(item) => void setResourceStatus(item, item.status === 'active' ? 'archived' : 'active')} onView={(item) => void openResourceDetail(item)} onDelete={(item) => void removeResource(item)} onToggleFavorite={(item) => void toggleResourceFavorite(item)} />}{panel === 'agents' && <Agents agents={agents} selectedId={selectedId} entryTab={agentsEntry} favorites={favorites} onSelect={setSelectedId} onCreate={() => setModal(true)} onChat={openChat} onRefresh={() => void refresh()} onCreateFromTemplate={(name) => { setAgentName(name); setModal(true); }} onToggleFavorite={(agent) => void toggleAgentFavorite(agent)} />}{panel === 'chat' && agent && session && <Chat agent={agent} session={session} messages={messages} text={text} sending={sending} onText={setText} onSubmit={submitMessage} onBack={() => setPanel('agents')} />}{panel === 'conversations' && <PlaceholderPanel title="会话管理" description="查看当前用户下各 Agent 的会话记录。会话详情已可从 Agent 页面进入。" icon={<MessageSquare />} onNavigate={() => setPanel('agents')} action="进入我的 Agents" />}{panel === 'deploy' && <PlaceholderPanel title="部署发布" description={capabilities.agentExecution ? '本地开发部署记录' : 'Agent 部署暂未开放'} icon={<Zap />} onNavigate={() => setPanel('agents')} action="查看 Agent 状态" />}{panel === 'control' && <PlaceholderPanel title="运维控制" description="运维命令、状态漂移与执行回执将在控制面接口接入后开放。" icon={<Settings2 />} onNavigate={() => setPanel('overview')} action="返回工作台" />}{panel === 'approvals' && <PlaceholderPanel title="审批中心" description="需要审批的高风险操作将在后续权限与审计模块接入后显示。" icon={<FileCheck2 />} onNavigate={() => setPanel('overview')} action="返回工作台" />}{panel === 'observability' && <ClientMonitoring key={user.userId + ':' + user.organizationId} />}{panel === 'notifications' && <NotificationCenter model={notices} />}{panel === 'favorites' && <FavoritesPanel favorites={favorites} onOpen={openFavorite} onRemove={(item) => void removeOneFavorite(item)} onGoCreateAgent={() => setModal(true)} onGoLibrary={() => setPanel('library')} />}{panel === 'billing' && <BillingPanel account={account} transactions={transactions} onTopUp={topUp} />}{panel === 'filing' && <FilingPanel filings={filings} onCreate={() => setFilingOpen(true)} onRefresh={() => void refresh()} />}</main>
-    </div>{modal && capabilities.agentLifecycle && <CreateModal name={agentName} engine={agentEngine} onName={setAgentName} onEngine={setAgentEngine} onSubmit={submitAgent} onClose={() => setModal(false)} />}{resourceModal && <CreateResourceModal kind={resourceKind} name={resourceName} description={resourceDescription} content={resourceContent} busy={resourceBusy} onKind={setResourceKind} onName={setResourceName} onDescription={setResourceDescription} onContent={setResourceContent} onSubmit={submitResource} onClose={() => setResourceModal(false)} />}{resourceDetail && <ResourceDetailModal detail={resourceDetail} onClose={() => setResourceDetail(null)} onSave={(content) => void saveResourceContent(content)} />}{noticeOpen && <NotificationPopover model={notices} onClose={() => setNoticeOpen(false)} onAll={() => { setNoticeOpen(false); setPanel('notifications'); }} />}<NotificationDetail model={notices} />{settingsOpen && <SettingsModal displayName={settings?.displayName ?? null} onSubmit={saveSettings} onClose={() => setSettingsOpen(false)} />}{filingOpen && <FilingModal onSubmit={submitFiling} onClose={() => setFilingOpen(false)} />}
+    </div>{modal && capabilities.agentLifecycle && <CreateModal name={agentName} engine={agentEngine} onName={setAgentName} onEngine={setAgentEngine} onSubmit={submitAgent} onClose={() => setModal(false)} />}{resourceModal && <CreateResourceModal kind={resourceKind} name={resourceName} description={resourceDescription} content={resourceContent} busy={resourceBusy} onKind={setResourceKind} onName={setResourceName} onDescription={setResourceDescription} onContent={setResourceContent} onSubmit={submitResource} onClose={() => setResourceModal(false)} />}{resourceDetail && <ResourceDetailModal detail={resourceDetail} onClose={() => setResourceDetail(null)} onSave={(content) => void saveResourceContent(content)} />}{noticeOpen && <NotificationPopover model={notices} onClose={() => setNoticeOpen(false)} onAll={() => { setNoticeOpen(false); setPanel('notifications'); }} />}<NotificationDetail model={notices} />{settingsOpen && <SettingsModal displayName={settings?.displayName ?? null} emailVerification={emailVerification} onSubmit={saveSettings} onClose={() => setSettingsOpen(false)} />}{filingOpen && <FilingModal onSubmit={submitFiling} onClose={() => setFilingOpen(false)} />}
   </div></CapabilitiesContext.Provider>;
 }
 function GlobalSearch({ agents, resources, onOpenAgent, onOpenResource }: { agents: BackendAgent[]; resources: BackendResource[]; onOpenAgent: (id: string) => void; onOpenResource: (kind: ResourceKind) => void }) { const capabilities = useContext(CapabilitiesContext);
@@ -346,7 +373,7 @@ function FilingPanel({ filings, onCreate, onRefresh }: { filings: FilingRecord[]
   const meta = (status: FilingRecord['status']) => status === 'approved' ? { pill: 'ready', icon: <CheckCircle2 />, label: '已通过' } : status === 'rejected' ? { pill: 'rejected', icon: <CircleAlert />, label: '已驳回' } : { pill: 'pending', icon: <Clock3 />, label: '审核中' };
   return <div className="page-stack"><section className="page-heading"><div><span className="eyebrow">平台服务</span><h1>备案管理</h1><p>登记业务域名与主体信息，备案通过后用于平台侧 Agent 服务资质核验。</p></div><div className="heading-actions"><button className="button secondary" onClick={onRefresh}><RefreshCw />刷新</button><button className="button primary" onClick={onCreate}><Plus />提交备案</button></div></section>{filings.length === 0 ? <section className="empty-state"><ShieldCheck /><h3>还没有备案记录</h3><p>提交你的业务域名与主体信息，平台完成核验后将通过通知同步结果。</p><button className="button primary" onClick={onCreate}><Plus />提交备案</button></section> : <div className="agent-list resource-list">{filings.map((item) => { const state = meta(item.status); return <div key={item.id} className="resource-row"><span className="resource-icon kb"><ShieldCheck /></span><span className="resource-main"><strong>{item.domain}</strong><small>{item.subjectName} · {item.subjectType === 'enterprise' ? '企业主体' : '个人主体'} · {item.id}</small></span><span className="resource-kind kb">网站备案</span><span className={'status-pill ' + state.pill}>{state.icon}{state.label}</span><span className="resource-actions"><span className="filing-time">提交于 {formatTime(item.createdAt)}</span>{item.icpNumber ? <span className="filing-icp">备案号 {item.icpNumber}</span> : null}</span></div>; })}</div>}</div>;
 }
-function SettingsModal({ displayName, onSubmit, onClose }: { displayName: string | null; onSubmit: (name: string) => Promise<void>; onClose: () => void }) {
+function SettingsModal({ displayName, emailVerification, onSubmit, onClose }: { displayName: string | null; emailVerification: ReactNode; onSubmit: (name: string) => Promise<void>; onClose: () => void }) {
   const [name, setName] = useState(displayName ?? '');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -355,7 +382,7 @@ function SettingsModal({ displayName, onSubmit, onClose }: { displayName: string
     setBusy(true); setMessage(null);
     try { await onSubmit(name); } catch (caught) { setMessage(caught instanceof Error ? caught.message : '保存设置失败'); } finally { setBusy(false); }
   }
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal" role="dialog" aria-modal="true"><header><div><span className="modal-icon"><Settings /></span><div><h2>个人设置</h2><p>管理显示昵称等偏好信息</p></div></div><button className="icon-button" title="关闭" aria-label="关闭" onClick={onClose}><X /></button></header><form onSubmit={submit}><label>显示昵称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="展示在控制台顶部用户区" /></label><p className="form-hint">昵称仅用于当前账户展示，留空时显示登录邮箱。</p>{message && <p className="form-error">{message}</p>}<footer><button type="button" className="button secondary" onClick={onClose}>取消</button><button type="submit" className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" /> : null}保存设置</button></footer></form></section></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="modal" role="dialog" aria-modal="true"><header><div><span className="modal-icon"><Settings /></span><div><h2>个人设置</h2><p>管理显示昵称等偏好信息</p></div></div><button className="icon-button" title="关闭" aria-label="关闭" onClick={onClose}><X /></button></header><form onSubmit={submit}><label>显示昵称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="展示在控制台顶部用户区" /></label><p className="form-hint">昵称仅用于当前账户展示，留空时显示登录邮箱。</p>{emailVerification}{message && <p className="form-error">{message}</p>}<footer><button type="button" className="button secondary" onClick={onClose}>取消</button><button type="submit" className="button primary" disabled={busy}>{busy ? <LoaderCircle className="spin" /> : null}保存设置</button></footer></form></section></div>;
 }
 function FilingModal({ onSubmit, onClose }: { onSubmit: (input: { domain: string; subjectName: string; subjectType: 'enterprise' | 'individual'; icpNumber?: string }) => Promise<void>; onClose: () => void }) {
   const [domain, setDomain] = useState('');

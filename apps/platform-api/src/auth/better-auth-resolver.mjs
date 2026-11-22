@@ -1,10 +1,14 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { betterAuth } from 'better-auth';
-import { APIError } from 'better-auth/api';
+import { APIError, getIP } from 'better-auth/api';
 import { sessionAllowed } from '../admin/governance.mjs';
 import { fromNodeHeaders } from 'better-auth/node';
 import { createClientIPResolver } from './client-ip.mjs';
-import { authPostgresDatabase } from './postgres-database.mjs';
+import { authPostgresDatabase, authTransactionDatabase } from './postgres-database.mjs';
 import { safeLog } from '../observability/safe-log.mjs';
+import { authEmailMode, createEmailQueue, createResendSender, readMailConfig } from './email-delivery.mjs';
+import { authTransaction, emailChallenges, lockAuthIdentity } from './email-challenges.mjs';
+import { authError, handleEmailAuth, isEmailAuthRoute, parseAuthJson } from './email-routes.mjs';
 
 export function betterAuthOptions(env, database) {
   if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) {
@@ -51,11 +55,48 @@ export class BetterAuthPrincipalResolver {
     if (env.NODE_ENV === 'test' && options.betterAuthDatabase) config.database = options.betterAuthDatabase;
     this.provider = 'better-auth';
     this.baseURL = config.baseURL;
+    this.emailMode = authEmailMode(env);
+    if (options.emailSender !== undefined && (env.NODE_ENV !== 'test' || typeof options.emailSender !== 'function')) {
+      throw new Error('auth_email_configuration_invalid');
+    }
+    this.mailContext = new AsyncLocalStorage();
+    if (this.emailMode !== 'off') {
+      if (!store.pool) throw new Error('auth_email_configuration_invalid');
+      const send = options.emailSender ?? createResendSender(readMailConfig(env));
+      this.email = emailChallenges(store.pool, this.baseURL, config.secret);
+      this.pendingSignins = 0;
+      this.maxPendingSignins = Math.max(1, Math.min(8, Math.floor((store.pool.options?.max ?? 20) / 2)));
+      this.enqueueEmail = createEmailQueue(async job => {
+        const message = await this.email.issue(job);
+        if (message) await send(message);
+      });
+      if (this.emailMode === 'enforce') {
+        config.emailAndPassword.requireEmailVerification = true;
+        config.emailVerification = {
+          sendOnSignUp: true, sendOnSignIn: false, autoSignInAfterVerification: false,
+          // The native JWT is never sent or exposed. Capture the new identity
+          // only; deliver our single-use challenge after signup commits.
+          sendVerificationEmail: async ({ user }) => {
+            const capture = this.mailContext.getStore();
+            if (capture) capture.signupId = user.id;
+          },
+        };
+      }
+    }
     config.databaseHooks = { session: { create: { before: async (session, context) => {
       // Sign-up holds an auth transaction; its session INSERT uses the SQL guard on that connection.
       if (store.pool && context?.path === '/sign-up/email') return;
-      if (!await sessionAllowed(store, session.userId)) throw new APIError('FORBIDDEN', { code: 'account_banned', message: 'Account access is restricted' });
+      const transaction = this.mailContext.getStore();
+      const client = transaction?.client;
+      if (client && transaction.authId !== session.userId) {
+        throw new APIError('UNAUTHORIZED', { code: 'INVALID_EMAIL_OR_PASSWORD', message: 'Invalid email or password' });
+      }
+      const allowed = client
+        ? (await client.query('SELECT platform_account_session_allowed($1) AS allowed', [session.userId])).rows[0]?.allowed
+        : await sessionAllowed(store, session.userId);
+      if (!allowed) throw new APIError('FORBIDDEN', { code: 'account_banned', message: 'Account access is restricted' });
     } } } };
+    this.config = config;
     this.auth = betterAuth(config);
     if (!store.pool) store.governanceRevokeSessions = async userId => {
       const subject = store.users.get(userId)?.authSubject;
@@ -63,12 +104,29 @@ export class BetterAuthPrincipalResolver {
     };
   }
 
-  async resolve(request) {
-    const session = await this.auth.api.getSession({
+  async session(request) {
+    return this.auth.api.getSession({
       headers: fromNodeHeaders(request.headers),
       query: { disableCookieCache: true, disableRefresh: true },
     });
-    if (!session) return null;
+  }
+
+  rateLimitPeer(request) {
+    // Preserve Better Auth's IPv4-mapped and IPv6 /64 bucket semantics.
+    // This header is set exclusively from the validated TCP/proxy chain.
+    const headers = new Headers({ 'x-bairui-peer-ip': this.clientIP(request) });
+    const peer = getIP(headers, this.config);
+    if (!peer) throw new Error('invalid_client_ip');
+    return peer;
+  }
+
+  async resolve(request) {
+    const session = await this.session(request);
+    if (!session || (this.emailMode === 'enforce' && session.user.emailVerified !== true)) return null;
+    return this.principalForSession(session);
+  }
+
+  async principalForSession(session) {
     const user = await this.store.ensureIdentityUser({
       subject: 'better-auth:' + session.user.id,
       email: session.user.email,
@@ -77,15 +135,52 @@ export class BetterAuthPrincipalResolver {
     const organizations = await this.store.listUserOrganizations(user.id);
     const active = organizations.find(item => item.id === user.organizationId);
     if (!active) throw new Error('identity_membership_missing');
-    return { userId: user.id, email: user.email, organizationId: active.id, role: active.role, organizations };
+    return { userId: user.id, email: user.email, emailVerified: session.user.emailVerified === true,
+      organizationId: active.id, role: active.role, organizations };
+  }
+
+  async handleEmailSignin(makeRequest, email, peer) {
+    const limited = seconds => new Response(JSON.stringify({ error: { code: 'too_many_requests', message: 'Too many requests' } }),
+      { status: 429, headers: { 'content-type': 'application/json', 'retry-after': String(seconds) } });
+    if (this.pendingSignins >= this.maxPendingSignins) return limited(1);
+    this.pendingSignins++;
+    try {
+      // Keep the pinned native 3 / 10s sign-in rule, but make admission
+      // atomic across replicas and complete it before borrowing a locked
+      // credential transaction. A first-row conflict must not abort login.
+      if (!await this.email.limit('/api/auth/sign-in/email', peer, 3, 10000)) return limited(10);
+      return await this.signinWithIdentityLock(makeRequest, email);
+    } finally { this.pendingSignins--; }
+  }
+
+  async signinWithIdentityLock(makeRequest, email) {
+    let verificationId;
+    const result = await authTransaction(this.store.pool, async client => {
+      const { rows: [identity] } = await client.query('SELECT id FROM ba_user WHERE email = $1', [email]);
+      // Native password timing padding still runs for missing identities.
+      // The session hook denies any identity not locked here.
+      if (identity) await lockAuthIdentity(client, identity.id);
+      const database = authTransactionDatabase(client);
+      const attempt = await this.mailContext.run({ client, authId: identity?.id }, () =>
+        betterAuth({ ...this.config, database, rateLimit: { ...this.config.rateLimit, enabled: false } }).handler(makeRequest()));
+      if (this.emailMode === 'enforce' && attempt.status === 403
+        && (await attempt.clone().json().catch(() => null))?.code === 'EMAIL_NOT_VERIFIED') verificationId = identity?.id;
+      return attempt;
+    });
+    if (verificationId) this.enqueueEmail({ kind: 'verify', authId: verificationId });
+    return result;
   }
 
   async handle(request, response, path, maxBodyBytes) {
+    if (isEmailAuthRoute(path)) return handleEmailAuth(this, request, response, path, maxBodyBytes);
     const allowed = new Set(['/api/auth/sign-up/email', '/api/auth/sign-in/email', '/api/auth/sign-out']);
     if (request.method !== 'POST' || !allowed.has(path)) {
       response.writeHead(404, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: { code: 'not_found', message: 'Not found' } }));
       return;
+    }
+    if (path === '/api/auth/sign-up/email' && this.emailMode === 'transition') {
+      return authError(response, 403, 'registration_paused');
     }
     const chunks = [];
     let size = 0;
@@ -97,11 +192,23 @@ export class BetterAuthPrincipalResolver {
     const headers = fromNodeHeaders(request.headers);
     // Only a verified TCP peer and its validated forwarding chain may set this header.
     headers.set('x-bairui-peer-ip', this.clientIP(request));
-    const result = await this.auth.handler(new Request(this.baseURL + path, {
-      method: request.method, headers, body: Buffer.concat(chunks),
-    }));
+    const body = Buffer.concat(chunks);
+    const makeRequest = () => new Request(this.baseURL + path, { method: request.method, headers, body });
+    let result;
+    if (this.emailMode !== 'off' && path === '/api/auth/sign-in/email') {
+      const input = parseAuthJson(body);
+      // Better Auth validates the credentials; lookup must match its lowercase
+      // normalization so the lock always covers the same authenticated identity.
+      if (!input || typeof input.email !== 'string' || input.email.length > 254) return authError(response, 400, 'invalid_request');
+      result = await this.handleEmailSignin(makeRequest, input.email.toLowerCase(), this.rateLimitPeer(request));
+    } else if (this.emailMode === 'enforce' && path === '/api/auth/sign-up/email') {
+      const capture = {};
+      result = await this.mailContext.run(capture, () => this.auth.handler(makeRequest()));
+      if (result.ok && capture.signupId) this.enqueueEmail({ kind: 'verify', authId: capture.signupId });
+    } else result = await this.auth.handler(makeRequest());
     response.statusCode = result.status;
     result.headers.forEach((value, name) => { if (name !== 'set-cookie') response.setHeader(name, value); });
+    if (this.emailMode !== 'off') response.setHeader('cache-control', 'no-store');
     const retryAfter = result.headers.get('retry-after') ?? result.headers.get('x-retry-after');
     if (result.status === 429 && retryAfter) response.setHeader('retry-after', retryAfter);
     const cookies = result.headers.getSetCookie();

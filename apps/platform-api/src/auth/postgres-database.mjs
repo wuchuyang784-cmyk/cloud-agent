@@ -40,3 +40,11 @@ export function authPostgresDatabase(pool) {
     transaction: true,
   };
 }
+
+// Borrow the already locked transaction client; Kysely must neither release
+// it nor open a nested transaction. The auth transaction owns its lifetime.
+export function authTransactionDatabase(client) {
+  const connection = { query: client.query.bind(client), release() {} };
+  const database = authPostgresDatabase({ connect: async () => connection, end: async () => {} });
+  return { ...database, transaction: false };
+}

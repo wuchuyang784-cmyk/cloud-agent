@@ -10,6 +10,8 @@ F2 本人加密凭据、运行范围授权与独立模型网关：[57-f2-model-a
 
 F3-A 独立 pi 沙箱协议底座与只读配置检查：[58-f3-pi-sandbox.md](58-f3-pi-sandbox.md)。双容器策略、可信状态、RPC 与固定模型中转不等于 F3-B 原生 runsc/硬配额/实际生命周期验收；不开放用户创建执行，不加入默认启动链。
 
+邮箱验证与密码找回：[59-auth-email-verification-and-recovery.md](59-auth-email-verification-and-recovery.md)。默认关闭，保留老账号过渡与独立预发真实收信验收。
+
 ## 跨仓权威入口
 
 - 整体执行顺序：`BaiRui-agent/docs/AI-DEVELOPMENT-PLAN.md`

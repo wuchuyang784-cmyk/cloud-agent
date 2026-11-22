@@ -6,6 +6,8 @@ const fixedRoutes = new Set([
   '/api/auth/config', '/api/auth/me', '/api/auth/register', '/api/auth/login',
   '/api/auth/dev-login', '/api/auth/logout', '/api/auth/sign-up/email',
   '/api/auth/sign-in/email', '/api/auth/sign-out', '/api/simulation/tasks',
+  '/api/auth/email-verification/request', '/api/auth/email-verification/confirm',
+  '/api/auth/password-reset/request', '/api/auth/password-reset/confirm',
   '/api/user/resources', '/api/user/agents', '/api/user/usage', '/api/user/favorites',
   '/api/user/notifications', '/api/user/notifications/read-all', '/api/user/settings',
   '/api/user/announcements',
