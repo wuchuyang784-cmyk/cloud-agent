@@ -6,7 +6,7 @@ import { readFile, writeFile, readdir, mkdir, open, unlink, rename } from 'node:
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { stackConfig, gatewayConfig, gatewayPublish, consolePublicOrigin, bootstrapSql, assertOwned, assertLocalDocker, names, label, apiImage, webImage, bootstrapName, missingDockerObject, dockerEndpoint } from './preprod-config.mjs';
+import { stackConfig, gatewayConfig, gatewayPublish, consolePublicOrigin, bootstrapSql, assertOwned, assertLocalDocker, names, label, apiImage, webImage, bootstrapName, missingDockerObject, dockerEndpoint, validateApiReplicas } from './preprod-config.mjs';
 import { monitorNames } from './monitoring-config.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
 
@@ -53,6 +53,7 @@ export async function loadState() {
   try { state = JSON.parse(await readFile(paths.state, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw new Error('预发状态文件损坏，请先检查 output/preprod/state.json，不要删除数据卷。'); }
   if (state.version !== 1 || !/^[a-f0-9]{24}$/.test(state.installation) || !/^[a-f0-9]{64}$/.test(state.schemaHash)) throw new Error('预发状态文件无效。');
+  if (state.apiReplicas !== undefined) validateApiReplicas(state.apiReplicas);
   return state;
 }
 export async function saveState(state) {
@@ -144,6 +145,9 @@ async function migrations() {
   for (const name of (await readdir(dir)).filter(n => n.endsWith('.sql')).sort()) files.push({ name, sql: await readFile(join(dir, name), 'utf8') });
   return { files, hash: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
 }
+export async function assertSchemaCurrent(state) {
+  if (state.schemaHash !== (await migrations()).hash) throw new Error('迁移文件已变化。请先备份并单独核验数据库迁移；更新不会自动迁移或重建数据库。');
+}
 export const revisionDirectories = ['apps/platform-api/src', 'apps/console-mvp/src', 'apps/console-mvp/public', 'apps/admin-console/src', 'infra/preprod'];
 export const revisionFiles = ['apps/platform-api/Dockerfile', 'apps/platform-api/Dockerfile.dockerignore', 'apps/platform-api/package.json', 'apps/platform-api/package-lock.json',
   ...['package.json', 'package-lock.json', 'index.html', 'theme.css', 'tsconfig.json', 'tsconfig.app.json', 'tsconfig.node.json', 'vite.config.ts'].map(f => 'apps/console-mvp/' + f),
@@ -197,10 +201,12 @@ async function pauseApi(state) {
   await waitUntil(async () => (await containers(names.api, state)).length === 0, 'API 停止');
 }
 
-export async function up() {
+export async function up(options = {}) {
+  if (options.apiReplicas !== undefined) validateApiReplicas(options.apiReplicas);
   console.log('启动本机常驻预发；不读取 .env，不连接 bairui 业务库。');
   const local = await localDocker(), schema = await migrations();
   let state = await loadState();
+  const apiReplicas = validateApiReplicas(options.apiReplicas ?? state?.apiReplicas ?? 1);
   const publicOrigin = consolePublicOrigin(process.env.BAIRUI_CONSOLE_PUBLIC_ORIGIN ?? state?.publicOrigin);
   if (!state) {
     state = { version: 1, installation: randomBytes(12).toString('hex'), nodeId: local.nodeId, endpoint: local.endpoint,
@@ -218,6 +224,8 @@ export async function up() {
   }
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).assertMonitoringResources(state);
   if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).assertRuntimeResources('preprod', state);
+  // Persist only after all persistent resources are checked. monitor:up reuses it.
+  if (state.apiReplicas !== apiReplicas) { state.apiReplicas = apiReplicas; await saveState(state); }
   if (state.publicOrigin !== publicOrigin) { state.publicOrigin = publicOrigin; await saveState(state); }
   let gateway = await owned('container', names.gateway, state);
   const publication = gatewayPublish(publicOrigin);
@@ -276,7 +284,7 @@ export async function up() {
   const stack = stackConfig({ ...state, proxyIp, revision: rev });
   await writeFile(paths.stack, JSON.stringify(stack, null, 2) + '\n');
   await docker(['stack', 'config', '--compose-file', paths.stack]);
-  console.log('部署双 API 和独立数据库，等待初始化与就绪……');
+  console.log('部署 ' + apiReplicas + ' 份 API 和独立数据库，等待初始化与就绪……');
   await docker(['stack', 'deploy', '--detach=true', '--resolve-image', 'never', '--compose-file', paths.stack, names.stack]);
   await waitUntil(async () => {
     const rows = await containers(names.db, state);
@@ -284,8 +292,8 @@ export async function up() {
   }, '数据库初始化', 240000);
   await waitUntil(async () => {
     const rows = await containers(names.api, state);
-    return rows.length === 2 && rows.every(c => c.State.Health?.Status === 'healthy' && c.Config.Image === apiImage(rev));
-  }, '双 API 启动');
+    return rows.length === apiReplicas && rows.every(c => c.State.Health?.Status === 'healthy' && c.Config.Image === apiImage(rev));
+  }, 'API 启动');
   const localTls = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(publicOrigin).hostname);
   const cert = localTls ? await waitUntil(async () => {
     try { return await docker(['exec', names.gateway, 'cat', '/data/caddy/pki/authorities/local/root.crt']); }
@@ -299,7 +307,7 @@ export async function up() {
   await saveState(state);
   if (state.runtime?.enabled) await (await import('./runtime-deployment.mjs')).startRuntimeEnvironment('preprod');
   if (state.monitoring?.enabled) await (await import('./monitoring.mjs')).deployMonitoring(state);
-  console.log('预发已就绪：' + publicOrigin + '/admin/，双 API / 独立 bairui_preprod；监控同端口访问。');
+  console.log('预发已就绪：' + publicOrigin + '/admin/，' + apiReplicas + ' 份 API / 独立 bairui_preprod；监控同端口访问。');
   if (cert) console.log('公开 CA 证书：' + paths.ca + '；未修改系统信任。');
 }
 

@@ -26,11 +26,12 @@ test('explicit Docker context takes precedence over DOCKER_HOST during locality 
   assert.equal(dockerEndpoint({}, local), local);
 });
 
-test('only two production APIs and one pinned private database are deployed', () => {
+test('single-server default deploys one production API and one pinned private database', () => {
   const stack = stackConfig(input);
   assert.deepEqual(Object.keys(stack.services).sort(), ['api', 'db']);
   const api = stack.services.api, db = stack.services.db;
-  assert.equal(api.deploy.replicas, 2);
+  assert.equal(api.deploy.replicas, 1);
+  assert.equal(api.environment.BAIRUI_API_REPLICAS, '1');
   assert.equal(api.user, '1000:1000');
   assert.equal(api.environment.NODE_ENV, 'production');
   assert.equal(api.environment.BAIRUI_PLATFORM_MODE, 'platform');
@@ -47,6 +48,15 @@ test('only two production APIs and one pinned private database are deployed', ()
   assert.ok(api.healthcheck.test.join(' ').includes('/livez'));
   assert.equal(stack.volumes.pgdata.external.name, names.volume);
   assert.ok(!JSON.stringify(stack).includes('docker.sock'));
+});
+
+test('two API replicas require an explicit setting and invalid replica counts are rejected', () => {
+  const stack = stackConfig({ ...input, apiReplicas: 2 });
+  assert.equal(stack.services.api.deploy.replicas, 2);
+  assert.equal(stack.services.api.environment.BAIRUI_API_REPLICAS, '2');
+  for (const apiReplicas of [0, 3, -1, 1.5, '2', null]) {
+    assert.throws(() => stackConfig({ ...input, apiReplicas }), /api_replicas_invalid/);
+  }
 });
 
 test('proxy addresses fail closed', () => {
@@ -284,6 +294,20 @@ test('stopped same-image gateway is recreated with persistent data and a newly t
   assert.ok(fixture.mutations[run].includes('type=volume,source=' + names.caddyVolume + ',target=/data'));
   const stack = JSON.parse(fixture.writes.find(w => w.path === paths.stack).data);
   assert.equal(stack.services.api.environment.BAIRUI_TRUSTED_PROXIES, '10.0.1.9/32');
+});
+
+test('invalid explicit replica target cannot inspect Docker or mutate installation files', async t => {
+  const fixture = recoveryFixture(t);
+  await assert.rejects(up({ apiReplicas: 3 }), /api_replicas_invalid/);
+  assert.deepEqual(fixture.commands, []); assert.deepEqual(fixture.writes, []);
+});
+
+test('explicit dual API target is persisted and used by the actual generated stack', async t => {
+  const fixture = recoveryFixture(t);
+  await assert.rejects(up({ apiReplicas: 2 }), /stack deploy/);
+  const stack = JSON.parse(fixture.writes.find(w => w.path === paths.stack).data);
+  assert.equal(stack.services.api.deploy.replicas, 2);
+  assert.equal(JSON.parse(fixture.writes.find(w => w.path === paths.state + '.tmp').data).apiReplicas, 2);
 });
 
 for (const phase of ['running', 'stopped']) {

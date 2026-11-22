@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { assertMonitoringResources, ensureMonitoringResources, ensureMonitoringImages, monitoringServiceReady } from './monitoring.mjs';
+import { assertMonitoringResources, ensureMonitoringResources, ensureMonitoringImages, monitoringServiceReady, deployHostScrape } from './monitoring.mjs';
 import { validationDockerArgs } from './monitoring-rules.test.mjs';
 import { docker } from './preprod.mjs';
-import { monitorNames, monitorSecrets, monitorVolumes } from './monitoring-config.mjs';
+import { monitorNames, monitorSecrets, monitorVolumes, monitoringAssets, monitorImages } from './monitoring-config.mjs';
 
 function fixture(t, { absent = [], foreign, installed = true, internal = true, failInitializer = false } = {}) {
   const state = { installation: 'a'.repeat(24), nodeId: 'local-node', revision: 'b'.repeat(16),
@@ -36,6 +36,32 @@ function fixture(t, { absent = [], foreign, installed = true, internal = true, f
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   return { state, mutations, writes };
 }
+
+test('host scrape no-op retry verifies live Prometheus health and records its stack atomically', async t => {
+  const { state } = fixture(t);
+  let healthChecks = 0;
+  const config = monitoringAssets()['prometheus.json'];
+  t.mock.method(childProcess, 'execFile', (_command, args, _options, callback) => {
+    queueMicrotask(() => {
+      const [kind, action, name] = args;
+      const labels = { 'bairui.preprod.installation': state.installation };
+      if (kind === 'ps') { healthChecks++; return callback(null, 'prom-container', ''); }
+      const item = { Labels: labels, Spec: { Labels: labels }, Config: { Labels: labels }, Driver: 'overlay', Attachable: true, Internal: true };
+      if (action === 'inspect' && kind === 'service' && name === monitorNames.prometheus) item.Spec = { ...item.Spec, Name: monitorNames.prometheus, TaskTemplate: { ContainerSpec: { Configs: [{ ConfigName: 'installed-prom-config', File: { Name: '/etc/bairui/prometheus.json' } }] } } };
+      if (action === 'inspect' && kind === 'config') item.Spec.Data = Buffer.from(JSON.stringify(config)).toString('base64');
+      if (action === 'inspect' && kind === 'container') { item.State = { Health: { Status: 'healthy' } }; item.Config.Image = monitorImages.prometheus; }
+      callback(null, JSON.stringify(item), '');
+    });
+    return { stdin: { on() {}, end() {} } };
+  });
+  t.mock.method(fs, 'readFile', async () => JSON.stringify({ configs: { 'prometheus.json': { external: { name: 'installed-prom-config' } } } }));
+  const renames = [];
+  t.mock.method(fs, 'rename', async (from, to) => renames.push([from, to]));
+  syncBuiltinESMExports();
+  await deployHostScrape(state);
+  assert.ok(healthChecks > 0, 'equal desired content still requires actual health verification');
+  assert.ok(renames.some(([from, to]) => from.endsWith('monitoring-stack.json.tmp') && to.endsWith('monitoring-stack.json')));
+});
 
 test('explicit log capture includes stderr without changing JSON command output', async t => {
   t.mock.method(childProcess, 'execFile', (_command, _args, _options, callback) => {

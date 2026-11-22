@@ -51,7 +51,10 @@ Prometheus 的 `bairui-host` 任务显式 opt-in，每 15 秒抓取、5 秒超�
 
 - 目前只管理既有单节点 Swarm 预发安装；使用其已记录的本地 Docker endpoint、安装身份和监控网络，不读取业务 `.env`。
 - 原生 Linux，Docker Linux 引擎，内核至少 5.12；宿主 `/` 为 shared 或 slave。启动前检查，绝不自动改变主机挂载传播设置。
-- exporter 使用 `/ → /host:ro,rslave`；启动后读取容器实际 `/proc/self/mountinfo`，逐一检查 `/host` 及全部子挂载的 per-mount `ro`。只看 Docker 顶层 `RW=false` 不足以证明递归只读。实检失败停止本安装采集组件、保留卷，记录 failed。
+- exporter 使用自有 `output/preprod/host-root → /` 引用，根与选中的实际文件系统分别做 `readonly,bind-recursive=disabled,bind-propagation=rprivate` 绑定；不递归保留 Docker overlay/netns 引用。引用必须是当前执行用户拥有、实际指向 `/` 的符号链接，已有其他对象拒绝覆盖。每次启动及三个组件全部启动后读取实际 `/proc/self/mountinfo`，逐一检查 `/host` 及全部子挂载的 per-mount `ro`，同时拒绝 shared/master 传播。Docker inspect 也必须匹配完整挂载清单、NonRecursive、ReadOnly 与 rprivate。实检失败停止本安装采集组件、保留卷，记录 failed；不忽略 Docker 路径上的可写子挂载。
+- 旧版 `/:/host:ro,rslave` 在 exporter 初始检查后会传播后来创建的 Docker 可写挂载，已在常驻安装复现。直接把 `/` 改为 rprivate 又被 Docker daemon-root 保护拒绝。本修复通过**非递归**逐文件系统绑定避免持有运行时挂载引用；不能把引用改为递归绑定来绕过 Docker 保护。
+- 文件系统指标只允许实际绑定的挂载点。sampler 不增加 host PID 或权限，只读绑定宿主 `/proc/1/mountinfo`；采样前后比较挂载 ID、路径、设备号、子树根与文件系统类型，排除 Docker/伪文件系统的正常变化。真实文件系统新增、卸载或同路径替换时删除缓存，不继续发布旧挂载的值。完成磁盘操作后显式执行 `npm run monitor:host -- up` 重建快照；CPU/内存等也在拓扑恢复前按不可用处理。
+- 普通采集容器/Docker 重启可沿用同一宿主拓扑；宿主重启后挂载 ID 可能变化，此时必须显式执行 host up 重新确认。`unless-stopped` 不是未经拓扑确认的整机重启自动恢复承诺。
 - 回环 19100 必须没有其他采集器占用；不停止不属于本安装的进程。
 - 固定镜像需已存在或能从官方 registry 拉取；为镜像、日志与 Prometheus 历史留足磁盘空间。
 
@@ -76,7 +79,7 @@ npm run monitor:host -- up
 npm run monitor:host -- status
 ```
 
-若原安装尚未接入监控，先按文档 38/51 完成既有 `monitor:up` 流程；主机采集命令不会替你唤起已停止的监控栈。启用新增 3 个受信采集容器和 1 个缓存卷，现有 4 个监控服务保留；重发监控配置可能使相关服务短暂滚动，不开启新公网端口。
+若原安装尚未接入监控，先按文档 38/51 完成既有 `monitor:up` 流程；主机采集命令不会替你唤起已停止的监控栈。启用新增 3 个受信采集容器和 1 个缓存卷。host up/stop 仅切换 Prometheus 的主机抓取任务：官方配置验证后替换该服务的单个配置引用，使 Prometheus 短暂滚动；Grafana、Alertmanager、receiver、平台 API、数据库和网关不重建，不开启新公网端口。若实际配置除 host job 外与当前源码不同，拒绝顺带升级，须使用原有 monitor up 流程协调。
 
 访问地址仍为既有控制台 origin 的 `/admin/`。使用 active 平台 viewer/operator/admin 账号进入「运行监控 → 主机资源」。每次请求复核平台会话、账号状态与平台权限，普通用户不能访问；同源固定 `/api/admin/grafana/`，不增加独立 Grafana 登录或端口。
 
@@ -127,5 +130,16 @@ node scripts/host-monitoring-native-acceptance.mjs --ssh linux-validation \
 浏览器兼容测试使用原生 Grafana/Caddy/Prometheus 和临时认证 fixture，验证原 12 面板及新增 24 主机面板的同源查询、两组切换/刷新、桌面/手机布局及权限拒绝。浏览器测试没有启用主机任务，空数据是预期；真实来源/数值与故障闭环由独立 Linux 验收覆盖。该分层验收不冒充云端真实 Better Auth 用户的新版本上线验收。
 
 本批回归：后端 418 通过/14 数据库专项跳过/0 失败，管理端 36、客户端 37、配置组合 119、M1 专项 32 项通过，管理端构建通过；官方 promtool 验证含 host 的配置与原七条规则，amtool 通过。没有为使测试通过而启用旧 Worker/真实 Agent 或迁移业务库。
+
+## 2026-10-18：只读挂载修复与指定服务器启用
+
+用户明确授权后，在既有原生 Linux 安装定向更新三个 host 组件，仅滚动 Prometheus 的抓取配置；没有重建完整项目、迁移数据库或开放 Agent。先备份源码、state、stack 与资源身份，发布文件逐项校验 SHA-256。安装目录 `output/server-start/host-fix-release/` 保存部署日志、原始快照及 `live-verification.json`。
+
+- 配置/采集组合回归 69 项通过；既有预发配置 68 项通过；后端 420 项通过、14 个数据库专项跳过。服务器 M1 专项 39 项通过。官方 promtool 配置、七条规则及 amtool 检查通过，独立复核的重要问题已修正。
+- 最终 Linux 隔离报告 `output/m1-native/2026-10-18T07-43-22-878Z-1a4b5bf9/report.json`：11 项与清理通过。采集组件、其他容器创建/删除后全部宿主挂载仍 ro/private；绑定的 mountinfo 与宿主视图一致；拓扑不匹配清除样本并恢复；24 条精确表达式均有真实 series。停止 sampler 后实际 46.009 秒样本失效，21 条资源查询为空；8 个原运行容器 full ID 不变。
+- 常驻验收通过实际 Grafana Viewer 数据源查询 24/24 面板，均有真实数值；主机任务 up=1，样本年龄约 6.124 秒，总内存 3,837,116,416 字节与宿主精确一致。此处是实际 Grafana 数据源与面板定义验收，没有代用 fixture 登录，也没有创建/提升平台账号；未额外冒充真实用户浏览器重新登录验收。
+- 原双 API、数据库、网关、Grafana、Alertmanager、receiver 共 7 个容器 full ID 保留；Prometheus 单独配置滚动。原卷、Secret、安装身份、origin、API revision 与证书指纹保留，同 release 再次启动复用三个原采集容器。访问仍是 SSH 隧道后的 `https://localhost:8443/admin/`。
+
+此前验收脚本以“样本年龄小于 1.5 秒”准备失效测试，Docker exec 的往返时延会导致偶发超时；现改为等待时间戳严格变大的真实新样本，仍以真实时钟验证超过 45 秒失效，没有放宽生产有效期。
 
 最终浏览器报告：`output/monitoring-single-origin/2026-10-18T06-20-35-040Z/report.json`，原平台12项及主机24条精确表达式均完成查询，HTTP/逐查询/页面错误均为0；固定目录、旧卷升级、两组切换/刷新、1440/390/320px及权限拒绝通过，临时资源清理完成。浏览器健康阶段在故障注入前关闭，不把有意停机响应混入健康报告。本机原常驻服务保持停止。

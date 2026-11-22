@@ -43,6 +43,9 @@ async function verify() {
   if (!state || state.phase !== 'running') throw new Error('先运行 npm run preprod:up；验收只操作已归属的独立预发环境。');
   const local = await localDocker();
   assert.equal(local.nodeId, state.nodeId); assert.equal(local.endpoint, state.endpoint);
+  if ((await owned('service', names.api, state))?.Spec?.Mode?.Replicated?.Replicas !== 2) {
+    throw new Error('双 API 故障验收要求显式两副本；先运行 npm run deploy -- up --replicas 2，验收后可显式恢复 1。');
+  }
   await owned('service', names.api, state); await owned('service', names.db, state);
   const gateway = await owned('container', names.gateway, state);
   const [hostIp, hostPort] = gatewayPublish(state.publicOrigin).split(':');

@@ -52,6 +52,15 @@ test('metrics default to disabled without opening a listener or reading a token 
   await app.platform.telemetry.close();
 });
 
+test('replica target metric follows explicit deployment configuration without identity labels', async t => {
+  for (const replicas of [1, 2]) {
+    const f = await fixture(t, { env: { BAIRUI_API_REPLICAS: String(replicas) } });
+    const expected = await metric(f.app, 'bairui_api_expected_replicas');
+    assert.ok(expected);
+    assert.deepEqual(expected.values, [{ value: replicas, labels: {} }]);
+  }
+});
+
 test('explicit host monitoring registers actual memory gauges without host names or container-limit substitution', async t => {
   const normal = await fixture(t);
   assert.equal(await metric(normal.app, 'bairui_host_memory_total_bytes'), undefined);

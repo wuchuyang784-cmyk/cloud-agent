@@ -49,7 +49,13 @@ export function assertLocalDocker(info, endpoint) {
   assert.equal(info.Swarm?.Nodes, 1, 'single_node_only');
 }
 
-export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHash, monitoring, publicOrigin }) {
+export function validateApiReplicas(value = 1) {
+  assert.ok(value === 1 || value === 2, 'api_replicas_invalid');
+  return value;
+}
+
+export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHash, monitoring, publicOrigin, apiReplicas = 1 }) {
+  validateApiReplicas(apiReplicas);
   const consoleOrigin = consolePublicOrigin(publicOrigin);
   assert.match(installation, /^[a-f0-9]{24}$/);
   assert.match(nodeId, /^[a-z0-9-]+$/);
@@ -69,6 +75,7 @@ export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHas
           NODE_ENV: 'production', PORT: '8080', BAIRUI_PLATFORM_MODE: 'platform', BAIRUI_AUTH_MODE: 'better-auth',
           BAIRUI_SECRET_FILE: '/run/secrets/platform-env', BETTER_AUTH_URL: consoleOrigin,
           BAIRUI_TRUSTED_PROXIES: proxyIp + '/32', BAIRUI_SIMULATION_ENABLED: '0',
+          BAIRUI_API_REPLICAS: String(apiReplicas),
           BAIRUI_DB_POOL_MAX: '10', BAIRUI_DB_CONNECT_TIMEOUT_MS: '2000', BAIRUI_DB_QUERY_TIMEOUT_MS: '5000',
           ...(monitoring?.enabled ? { BAIRUI_METRICS_ENABLED: '1', BAIRUI_METRICS_PORT: '9464', BAIRUI_METRICS_TOKEN_FILE: '/run/secrets/metrics-token',
             BAIRUI_PROMETHEUS_URL: 'http://' + monitorNames.prometheus + ':9090',
@@ -82,7 +89,7 @@ export function stackConfig({ installation, nodeId, proxyIp, revision, schemaHas
           interval: '10s', timeout: '3s', retries: 3, start_period: '20s',
         },
         deploy: {
-          replicas: 2, labels, placement,
+          replicas: apiReplicas, labels, placement,
           resources: { limits: { cpus: '0.75', memory: '384M' }, reservations: { cpus: '0.10', memory: '128M' } },
           restart_policy: { condition: 'any', delay: '3s' },
           update_config: { parallelism: 1, delay: '3s', order: 'start-first', monitor: '20s', failure_action: 'rollback' },

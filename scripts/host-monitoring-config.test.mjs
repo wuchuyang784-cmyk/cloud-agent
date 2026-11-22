@@ -3,7 +3,38 @@ import assert from 'node:assert/strict';
 import { monitoringAssets, monitoringRevision, monitorConfigName } from './monitoring-config.mjs';
 let api = {};
 try { api = await import('./host-monitoring-config.mjs'); } catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error; }
-const input = { installation: 'a'.repeat(24), revision: 'b'.repeat(16), sourcePath: 'E:/cloud-agent/apps/platform-api/src/observability/host-metrics-bridge.mjs' };
+const input = { installation: 'a'.repeat(24), revision: 'b'.repeat(16), sourcePath: 'E:/cloud-agent/apps/platform-api/src/observability/host-metrics-bridge.mjs', rootAliasPath: '/srv/preprod/host-root', mountPaths: ['/', '/data'], mountTopology: [{ id: '1', path: '/', device: '8:1', root: '/', fstype: 'ext4' }, { id: '2', path: '/data', device: '8:2', root: '/', fstype: 'ext4' }] };
+
+test('host root references never recursively capture or propagate Docker runtime mounts', () => {
+  const args = api.hostContainerArgs(input);
+  const mounts = args.exporter.filter((_, index) => args.exporter[index - 1] === '--mount');
+  assert.deepEqual(mounts, [
+    'type=bind,source=/srv/preprod/host-root,target=/host,readonly,bind-recursive=disabled,bind-propagation=rprivate',
+    'type=bind,source=/srv/preprod/host-root/data,target=/host/data,readonly,bind-recursive=disabled,bind-propagation=rprivate',
+  ]);
+  assert.ok(args.exporter.includes('--collector.filesystem.mount-points-include=^(?:/|/data)$'));
+  for (const paths of [[], ['/data'], ['/', '/var/lib/docker'], ['/', '/run'], ['/', '/data,readonly=false'], ['/', '/../etc'], ['/', '/data', '/data']]) {
+    assert.throws(() => api.hostContainerArgs({ ...input, mountPaths: paths }));
+  }
+  assert.throws(() => api.hostContainerArgs({ ...input, rootAliasPath: '/' }));
+});
+
+test('filesystem binds select real mountpoints and exclude runtime mounts, preserving parent order', () => {
+  assert.equal(typeof api.hostFilesystemMounts, 'function');
+  const rows = '1 0 8:1 / / rw shared:1 - ext4 /dev/vda2 rw\n'
+    + '2 1 0:2 / /proc rw - proc proc rw\n3 1 0:3 / /run rw - tmpfs tmpfs rw\n'
+    + '4 1 0:4 / /var/lib/docker/overlay2/a/merged rw - overlay overlay rw\n'
+    + '5 1 8:2 / /data rw - ext4 /dev/vdb rw\n6 5 8:3 / /data/archive rw - xfs /dev/vdc rw\n';
+  assert.deepEqual(api.hostFilesystemMounts(rows).map(row => row.path), ['/', '/data', '/data/archive']);
+});
+
+test('host subtree must also reject future mount propagation even when currently read-only', () => {
+  const root = '1 0 8:1 / /host ro,relatime - ext4 /dev/vda2 rw\n';
+  assert.doesNotThrow(() => api.assertHostRootReadonly(root));
+  for (const flag of ['shared:1', 'master:1', 'propagate_from:1']) {
+    assert.throws(() => api.assertHostRootReadonly(root.replace(' - ext4', ' ' + flag + ' - ext4')), /host_metrics_mount_propagation_not_private/);
+  }
+});
 test('M1 isolated host resources use official pinned exporter, fixed private bridge and no Docker socket', () => {
   assert.equal(typeof api.hostContainerArgs, 'function');
   const result = api.hostContainerArgs(input);

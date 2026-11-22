@@ -4,9 +4,18 @@ import { readFile } from 'node:fs/promises';
 
 const module = await import('./host-monitoring-native-acceptance.mjs').catch(() => ({}));
 
+test('expiry setup waits for a newer real sample without a sub-IPC timing window', () => {
+  assert.equal(typeof module.hasNewHostSample, 'function');
+  const response = { status: 200, body: 'bairui_host_metrics_sample_timestamp_seconds 100\n' };
+  assert.equal(module.hasNewHostSample(response, 90000, 104000), true);
+  assert.equal(module.hasNewHostSample(response, 100000, 104000), false);
+  assert.equal(module.hasNewHostSample(response, 90000, 145001), false);
+  assert.equal(module.hasNewHostSample(response, 90000, 99000), false);
+});
+
 test('native acceptance rejects writable recursive host mounts and requires the actual root bind', () => {
   assert.equal(typeof module.checkHostMounts, 'function');
-  const root = '1 0 8:1 / /host ro,relatime shared:1 - ext4 /dev/vda1 rw';
+  const root = '1 0 8:1 / /host ro,relatime - ext4 /dev/vda1 rw';
   const child = '2 1 0:2 / /host/proc ro,nosuid - proc proc rw';
   assert.equal(module.checkHostMounts(root + '\n' + child).length, 2);
   assert.throws(() => module.checkHostMounts(root + '\n' + child.replace('ro,nosuid', 'rw,nosuid')), /host_metrics_submount_not_readonly/);

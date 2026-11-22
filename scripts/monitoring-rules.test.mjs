@@ -13,6 +13,12 @@ export function ruleTests() {
     rule_files: ['/etc/bairui/rules.json'], evaluation_interval: '15s', tests: [
       { name: 'two_healthy_replicas', interval: '15s', input_series: [...infra, up('10.0.0.2:9464'), up('10.0.0.3:9464'), ready('10.0.0.2:9464'), ready('10.0.0.3:9464')],
         alert_rule_test: [alert('ApiReplicaMissing', []), alert('DatabaseUnavailable', []), alert('MonitoringTargetDown', [])] },
+      { name: 'configured_single_replica_is_healthy', interval: '15s', input_series: [...infra, up('10.0.0.2:9464'), ready('10.0.0.2:9464'),
+        { series: 'bairui_api_expected_replicas{job="bairui-api",instance="10.0.0.2:9464"}', values: '1+0x40' }],
+        alert_rule_test: [alert('ApiReplicaMissing', [])] },
+      { name: 'configured_two_replicas_with_one_missing', interval: '15s', input_series: [...infra, up('10.0.0.2:9464'),
+        { series: 'bairui_api_expected_replicas{job="bairui-api",instance="10.0.0.2:9464"}', values: '2+0x40' }],
+        alert_rule_test: [alert('ApiReplicaMissing', [{ exp_labels: { severity: 'critical' }, exp_annotations: {} }])] },
       { name: 'one_replica', interval: '15s', input_series: [...infra, up('10.0.0.2:9464'), ready('10.0.0.2:9464')],
         alert_rule_test: [alert('ApiReplicaMissing', [{ exp_labels: { severity: 'critical' }, exp_annotations: {} }])] },
       { name: 'zero_discovery_targets_is_not_healthy', interval: '15s', input_series: infra,

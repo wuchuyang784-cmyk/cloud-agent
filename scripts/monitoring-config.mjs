@@ -38,7 +38,7 @@ export function monitoringAssets(runtime, host) {
   const errorRate = 'sum(rate(bairui_http_requests_total{job="bairui-api",status=~"5..",route!~"/(livez|readyz|healthz)"}[5m])) / clamp_min(sum(rate(' + traffic + '[5m])), 0.001)';
   const latency = 'histogram_quantile(0.95, sum by (le) (rate(bairui_http_request_duration_seconds_bucket{job="bairui-api",route!~"/(livez|readyz|healthz)"}[5m])))';
   const rules = { groups: [{ name: 'bairui-preprod', interval: '15s', rules: [
-    rule('ApiReplicaMissing', '(sum(up{job="bairui-api"}) or vector(0)) < 2', '45s', 'critical'),
+    rule('ApiReplicaMissing', '(sum(up{job="bairui-api"}) or vector(0)) < (max(bairui_api_expected_replicas{job="bairui-api"}) or vector(2))', '45s', 'critical'),
     rule('DatabaseUnavailable', 'bairui_database_ready{job="bairui-api"} == 0 or (up{job="bairui-api"} == 1 unless on(instance) bairui_database_ready{job="bairui-api"})', '45s', 'critical'),
     rule('ApiErrorRateHigh', '(' + errorRate + ') > 0.05 and sum(increase(' + traffic + '[5m])) >= 20', '2m'),
     rule('ApiLatencyHigh', latency + ' > 1 and sum(increase(' + traffic + '[5m])) >= 20', '2m'),
@@ -85,9 +85,9 @@ export function monitoringAssets(runtime, host) {
     options: type === 'stat' ? { reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false } } : { legend: { displayMode: 'list', placement: 'bottom' }, tooltip: { mode: 'multi' } },
   });
   const dashboard = { uid: 'bairui-platform', title: 'BaiRui 平台运行监控', tags: ['bairui', 'preprod'],
-    schemaVersion: 39, version: 2, editable: false, timezone: 'browser', refresh: '15s', time: { from: 'now-30m', to: 'now' },
+    schemaVersion: 39, version: 3, editable: false, timezone: 'browser', refresh: '15s', time: { from: 'now-30m', to: 'now' },
     panels: [
-      panel(1, 'API 可采集副本 / 预期 2', 'sum(up{job="bairui-api"}) or vector(0)', 'short', 'stat', '可用副本'),
+      panel(1, 'API 可采集副本', 'sum(up{job="bairui-api"}) or vector(0)', 'short', 'stat', '可用副本'),
       panel(2, '数据库就绪 / 每 API', 'bairui_database_ready{job="bairui-api"}', 'short', 'stat'),
       panel(3, '业务请求速率', 'sum by(instance) (rate(' + traffic + '[5m]))', 'reqps'),
       panel(4, '业务请求 P95', latency, 's', 'timeseries', 'P95'),

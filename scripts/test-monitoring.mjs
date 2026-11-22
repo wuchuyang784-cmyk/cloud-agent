@@ -45,6 +45,9 @@ async function verify() {
   assert.ok(state?.monitoring?.enabled && state.monitoring.phase === 'running' && state.phase === 'running', '先运行 npm run monitor:up。');
   const local = await localDocker();
   assert.equal(local.nodeId, state.nodeId); assert.equal(local.endpoint, state.endpoint);
+  if ((await owned('service', names.api, state))?.Spec?.Mode?.Replicated?.Replicas !== 2) {
+    throw new Error('双 API 告警故障验收要求显式两副本；先运行 npm run deploy -- up --replicas 2，验收后可显式恢复 1。');
+  }
   await assertMonitoringResources(state);
   await validateMonitoring(state.monitoring.runtime, state.monitoring.host);
   const gateway = await owned('container', names.gateway, state);

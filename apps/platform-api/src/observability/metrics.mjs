@@ -13,6 +13,8 @@ export function metricsConfiguration(env) {
   if (env.BAIRUI_METRICS_ENABLED !== '1') return { enabled: false };
   const port = Number(env.BAIRUI_METRICS_PORT ?? 9464);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('metrics_port_invalid');
+  const expectedReplicas = env.BAIRUI_API_REPLICAS === undefined ? undefined : Number(env.BAIRUI_API_REPLICAS);
+  if (expectedReplicas !== undefined && !['1', '2'].includes(env.BAIRUI_API_REPLICAS)) throw new Error('metrics_replicas_invalid');
   let fd, text;
   try {
     fd = openSync(env.BAIRUI_METRICS_TOKEN_FILE ?? '/run/secrets/metrics-token', 'r');
@@ -26,7 +28,7 @@ export function metricsConfiguration(env) {
   const token = text.replace(/\r?\n$/, '');
   if (!/^[A-Za-z0-9._~+/-]{32,256}={0,2}$/.test(token) || token.length > 256
     || new Set(token).size < 8 || /^(.{1,16})\1+$/.test(token)) throw new Error('metrics_token_invalid');
-  return { enabled: true, port, tokenHash: digest(token), hostMetrics: env.BAIRUI_HOST_METRICS_ENABLED === '1' };
+  return { enabled: true, port, tokenHash: digest(token), hostMetrics: env.BAIRUI_HOST_METRICS_ENABLED === '1', expectedReplicas };
 }
 
 function authorized(request, tokenHash) {
@@ -56,6 +58,10 @@ export function createTelemetry(config, store, { readinessTimeoutMs = 250 } = {}
   const registry = new Registry();
   collectDefaultMetrics({ register: registry });
   const registers = [registry];
+  if (config.expectedReplicas !== undefined) {
+    new Gauge({ name: 'bairui_api_expected_replicas', help: 'Configured API replica target, not a measurement of running containers.', registers })
+      .set(config.expectedReplicas);
+  }
   if (config.hostMetrics) {
     const host = createHostSampler();
     new Gauge({ name: 'bairui_host_cpu_usage_ratio', help: 'Measured host CPU busy fraction since the preceding scrape.', registers,

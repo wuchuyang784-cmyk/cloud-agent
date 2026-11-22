@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { docker, owned, loadState, saveState, localDocker, checkResources, output, withLock, up, containers, waitUntil, request } from './preprod.mjs';
@@ -93,6 +93,54 @@ export async function deployMonitoring(state) {
   }, '四项监控服务启动', 240000);
   const health = await request('/api/admin/grafana/api/health');
   if (health.status !== 401) throw new Error('管理端同源 Grafana 匿名拒绝检查失败。');
+  state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision(state.monitoring?.runtime, state.monitoring?.host);
+  await saveState(state);
+}
+
+export function hostScrapeUpdateArgs(service, target) {
+  assert.equal(service?.Spec?.Name, monitorNames.prometheus, 'host_scrape_prometheus_only');
+  assert.match(target, /^bairui-monitor-prometheus-[a-f0-9]{16}$/);
+  const configs = service.Spec.TaskTemplate.ContainerSpec.Configs.filter(c => c.File?.Name === '/etc/bairui/prometheus.json');
+  assert.equal(configs.length, 1, 'host_scrape_existing_config_required');
+  if (configs[0].ConfigName === target) return null;
+  return ['service', 'update', '--detach=true', '--config-rm', configs[0].ConfigName, '--config-add',
+    'source=' + target + ',target=/etc/bairui/prometheus.json,mode=0444', monitorNames.prometheus];
+}
+
+// Host opt-in changes only a scrape job. Do not roll Grafana, Alertmanager,
+// receiver or platform services merely because the asset bundle hash changes.
+export async function deployHostScrape(state) {
+  await assertMonitoringResources(state);
+  const path = join(output, 'monitoring-stack.json');
+  const stack = JSON.parse(await readFile(path, 'utf8'));
+  assert.ok(typeof stack.configs?.['prometheus.json']?.external?.name === 'string', 'host_scrape_stack_manifest_required');
+  const service = await owned('service', monitorNames.prometheus, state);
+  const currentRef = service.Spec.TaskTemplate.ContainerSpec.Configs.find(c => c.File?.Name === '/etc/bairui/prometheus.json');
+  assert.ok(currentRef, 'host_scrape_existing_config_required');
+  const current = JSON.parse(Buffer.from((await owned('config', currentRef.ConfigName, state)).Spec.Data, 'base64').toString('utf8'));
+  const next = monitoringAssets(state.monitoring?.runtime, state.monitoring?.host)['prometheus.json'];
+  const withoutHost = value => ({ ...value, scrape_configs: value.scrape_configs.filter(job => job.job_name !== 'bairui-host') });
+  assert.deepEqual(withoutHost(current), withoutHost(next), 'host_scrape_other_configuration_changed_use_monitor_up');
+  let target = currentRef.ConfigName;
+  if (JSON.stringify(current) !== JSON.stringify(next)) {
+    await validateMonitoring(state.monitoring?.runtime, state.monitoring?.host);
+    target = monitorConfigName('prometheus.json', state.monitoring?.runtime, state.monitoring?.host);
+    if (!await owned('config', target, state)) await docker(['config', 'create', '--label', label + '=' + state.installation, target, '-'], { input: JSON.stringify(next) });
+    assert.deepEqual(JSON.parse(Buffer.from((await owned('config', target, state)).Spec.Data, 'base64').toString('utf8')), next, 'host_scrape_config_content_mismatch');
+    const args = hostScrapeUpdateArgs(service, target);
+    if (args) await docker(args);
+  }
+  await waitUntil(async () => {
+    const currentService = await owned('service', monitorNames.prometheus, state);
+    return currentService.Spec.TaskTemplate.ContainerSpec.Configs.some(c => c.ConfigName === target)
+      && monitoringServiceReady(currentService, await containers(monitorNames.prometheus, state), monitorImages.prometheus);
+  }, '主机抓取配置就绪', 120000);
+  // Record the actual published config without inventing replacements for the
+  // unchanged services' config references in the persisted stack manifest.
+  const active = await owned('service', monitorNames.prometheus, state);
+  stack.configs['prometheus.json'].external.name = active.Spec.TaskTemplate.ContainerSpec.Configs.find(c => c.File?.Name === '/etc/bairui/prometheus.json').ConfigName;
+  await writeFile(path + '.tmp', JSON.stringify(stack, null, 2) + '\n', { mode: 0o600 });
+  await rename(path + '.tmp', path);
   state.monitoring.phase = 'running'; state.monitoring.revision = monitoringRevision(state.monitoring?.runtime, state.monitoring?.host);
   await saveState(state);
 }

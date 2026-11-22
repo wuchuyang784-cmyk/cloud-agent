@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { docker, inspect, owned, containers, loadState, saveState, localDocker, withLock, waitUntil, root } from './preprod.mjs';
 import { apiImage, label, assertOwned } from './preprod-config.mjs';
 import { monitorNames, monitorServices } from './monitoring-config.mjs';
-import { assertNativeHost, assertHostMountPrerequisites, assertHostRootReadonly, hostContainerArgs, hostComponentLabel, hostExporterImage, hostNames, hostReleaseLabel, hostReleaseRevision, hostCacheInitializationArgs } from './host-monitoring-config.mjs';
+import { assertNativeHost, assertHostMountPrerequisites, assertHostRootReadonly, hostContainerArgs, hostComponentLabel, hostExporterImage, hostNames, hostReleaseLabel, hostReleaseRevision, hostCacheInitializationArgs, ensureHostRootAlias, hostFilesystemMounts } from './host-monitoring-config.mjs';
 import { runWithKeepAlive } from './cli-keepalive.mjs';
 
 export async function assertHostMonitoringResources(state, { inspectImpl = inspect } = {}) {
@@ -58,10 +58,20 @@ export function hostContainersCurrent(resources, release, input) {
       || !host.SecurityOpt?.includes('no-new-privileges:true') || Object.keys(host.PortBindings ?? {}).length || host.PublishAllPorts
       || host.NetworkMode !== (key === 'bridge' ? monitorNames.network : 'host') || (host.PidMode || '') !== (key === 'exporter' ? 'host' : '')) return false;
     const mounts = item.Mounts ?? [];
-    if (key === 'exporter') return mounts.length === 1 && mounts[0].Type === 'bind' && mounts[0].Source === '/' && mounts[0].Destination === '/host' && mounts[0].RW === false && mounts[0].Propagation === 'rslave';
+    if (key === 'exporter') return mounts.length === input.mountPaths.length && host.Mounts?.length === input.mountPaths.length && input.mountPaths.every(path => {
+      const source = input.rootAliasPath + (path === '/' ? '' : path), target = '/host' + (path === '/' ? '' : path);
+      const actual = mounts.find(m => m.Destination === target), requested = host.Mounts.find(m => m.Target === target);
+      return actual?.Type === 'bind' && actual.Source === source && actual.RW === false && actual.Propagation === 'rprivate'
+        && requested?.Type === 'bind' && requested.Source === source && requested.ReadOnly === true
+        && requested.BindOptions?.NonRecursive === true && requested.BindOptions.Propagation === 'rprivate';
+    });
     const code = mounts.find(m => m.Destination === '/app/host-metrics-bridge.mjs'), data = mounts.find(m => m.Destination === '/data');
-    return mounts.length === 2 && code?.Type === 'bind' && code.Source === input.sourcePath && code.RW === false
+    const topology = mounts.find(m => m.Destination === '/app/host-mountinfo');
+    const topologyBind = host.Mounts?.find(m => m.Target === '/app/host-mountinfo');
+    return mounts.length === (key === 'sampler' ? 3 : 2) && code?.Type === 'bind' && code.Source === input.sourcePath && code.RW === false
       && data?.Type === 'volume' && data.Name === hostNames.volume && data.RW === (key === 'sampler')
+      && (key !== 'sampler' || topology?.Type === 'bind' && topology.Source === '/proc/1/mountinfo' && topology.RW === false && topology.Propagation === 'rprivate'
+        && topologyBind?.ReadOnly === true && topologyBind.BindOptions?.NonRecursive === true && topologyBind.BindOptions.Propagation === 'rprivate')
       && (key !== 'bridge' || Object.keys(item.NetworkSettings?.Networks ?? {}).join(',') === monitorNames.network);
   });
 }
@@ -102,7 +112,11 @@ export async function startHostMonitoring(state, { recreate = false } = {}) {
   const resources = await assertHostMonitoringResources(state);
   const sourcePath = resolve(root, 'apps/platform-api/src/observability/host-metrics-bridge.mjs').replaceAll('\\', '/');
   await access(sourcePath);
-  const input = { installation: state.installation, revision: state.revision, sourcePath };
+  const rootAliasPath = resolve(root, 'output/preprod/host-root');
+  await ensureHostRootAlias(rootAliasPath);
+  const info = JSON.parse(await docker(['info', '--format', '{{json .}}']));
+  const mountTopology = hostFilesystemMounts(await readFile('/proc/1/mountinfo', 'utf8'), info.DockerRootDir);
+  const input = { installation: state.installation, revision: state.revision, sourcePath, rootAliasPath, mountPaths: mountTopology.map(row => row.path), mountTopology, dockerRoot: info.DockerRootDir };
   const release = hostReleaseRevision(input, await readFile(sourcePath, 'utf8'));
   if (!recreate && hostContainersCurrent(resources, release, input)) {
     try { await verifyHostRoot(resources.exporter.Id); await waitHostHealthy(state); }
@@ -129,6 +143,9 @@ export async function startHostMonitoring(state, { recreate = false } = {}) {
       await docker(commands[key]);
       if (key === 'exporter') await verifyHostRoot(hostNames.exporter);
     }
+    // Recheck after creating peers: rslave used to introduce writable Docker
+    // mounts here, after the initial exporter-only check had already passed.
+    await verifyHostRoot(hostNames.exporter);
     await waitHostHealthy(state);
   } catch (error) {
     await stopHostMonitoring(state); state.monitoring.host.phase = 'failed'; await saveState(state); throw error;
@@ -144,19 +161,19 @@ async function context() {
 }
 async function main(command) {
   const state = await context();
-  const { assertMonitoringResources, deployMonitoring } = await import('./monitoring.mjs');
+  const { assertMonitoringResources, deployHostScrape } = await import('./monitoring.mjs');
   await assertMonitoringResources(state);
   if (command === 'up') {
     assert.ok(await existingMonitoringRunning(state), '既有监控未运行；主机采集命令不会自动唤起已停止的监控栈。');
     await nativeContext(state); await assertHostMonitoringResources(state);
     state.monitoring.host = { ...(state.monitoring.host ?? {}), enabled: true };
     await startHostMonitoring(state, { recreate: true });
-    await deployMonitoring(state);
+    await deployHostScrape(state);
     console.log('Linux 整机采集已启用：管理端 → 运行监控 → 主机资源；无新公网端口。');
   } else if (command === 'stop') {
     const publish = await existingMonitoringRunning(state);
     await stopHostMonitoring(state);
-    if (state.monitoring.host) { state.monitoring.host.enabled = false; await saveState(state); if (publish) await deployMonitoring(state); }
+    if (state.monitoring.host) { state.monitoring.host.enabled = false; await saveState(state); if (publish) await deployHostScrape(state); }
     console.log('主机采集已停止；指标历史、主机缓存卷及原监控数据保留。');
   } else if (command === 'status') {
     if (!state.monitoring.host?.resourcesReady) { console.log('整机采集未安装；没有用容器自身资源替代宿主机数据。'); return; }

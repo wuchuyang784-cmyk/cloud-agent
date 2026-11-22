@@ -6,6 +6,26 @@ import { join } from 'node:path';
 let api = {};
 try { api = await import('../src/observability/host-metrics-bridge.mjs'); } catch (error) { if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error; }
 const sample = 'node_cpu_seconds_total{cpu="0",mode="idle"} 100\nnode_memory_MemTotal_bytes 8192\nnode_memory_MemAvailable_bytes 4096\nnode_time_seconds 1700000000\nnode_boot_time_seconds 1699990000\nnode_network_receive_bytes_total{device="eth0"} 1024\n';
+
+test('topology guard ignores Docker churn but rejects added, removed and same-path replaced filesystems', () => {
+  const root = '1 0 8:1 / / rw shared:1 - ext4 /dev/vda2 rw\n';
+  const data = '2 1 8:2 / /data rw - ext4 /dev/vdb rw\n';
+  const expected = { mounts: api.hostFilesystemMounts(root + data), dockerRoot: '/var/lib/docker' };
+  assert.doesNotThrow(() => api.assertHostMountTopology(root + data + '9 1 0:5 / /var/lib/docker/overlay2/new/merged rw - overlay overlay rw\n', expected));
+  for (const actual of [root, root + data.replace('2 1', '3 1'), root + data.replace('8:2', '8:3'), root + data.replace(' / /data', ' /subdir /data'), root + data.replace('ext4', 'xfs'), root + data + '3 1 8:3 / /archive rw - xfs /dev/vdc rw\n']) {
+    assert.throws(() => api.assertHostMountTopology(actual, expected));
+  }
+});
+
+test('mount topology changes before or during a sample remove old data instead of publishing stale filesystem values', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'm1-topology-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const failAt of [1, 2]) {
+    await api.writeHostSnapshot(directory, sample);
+    let checks = 0;
+    await assert.rejects(api.sampleHostMetrics({ directory, fetchImpl: async () => new Response(sample), verifyTopology: async () => { if (++checks === failAt) throw new Error('topology changed'); } }));
+    await assert.rejects(readFile(join(directory, 'snapshot.json')));
+  }
+});
 test('M1 exposes bounded snapshot sampling and a read-only bridge', () => {
   for (const name of ['filterHostMetrics', 'writeHostSnapshot', 'readHostSnapshot', 'sampleHostMetrics', 'createHostMetricsBridge']) assert.equal(typeof api[name], 'function', name);
 });

@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes, createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile, copyFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, copyFile, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hostExporterImage, hostContainerArgs, hostCacheInitializationArgs, hostScrapeJob,
-  assertNativeHost, assertHostMountPrerequisites, assertHostRootReadonly } from './host-monitoring-config.mjs';
+  assertNativeHost, assertHostMountPrerequisites, assertHostRootReadonly, hostFilesystemMounts, ensureHostRootAlias } from './host-monitoring-config.mjs';
 import { hostDashboardExpressions } from '../apps/platform-api/src/admin/host-dashboard.mjs';
 
 const exec = promisify(execFile), ownerLabel = 'bairui.m1-native.acceptance';
@@ -75,6 +75,10 @@ export function checkHostMounts(text) {
     .filter(fields => fields[4] === '/host' || fields[4].startsWith('/host/'))
     .map(fields => ({ path: fields[4], options: fields[5] }));
 }
+export function hasNewHostSample(response, previous, now = Date.now()) {
+  const sampledAt = Number(response.body?.match(/^bairui_host_metrics_sample_timestamp_seconds ([\d.]+)$/m)?.[1]) * 1000;
+  return response.status === 200 && Number.isFinite(sampledAt) && sampledAt > previous && sampledAt <= now && now - sampledAt <= 45000;
+}
 export async function removeOwnedResource({ type, name, owner, docker: dockerImpl = docker }) {
   const item = await inspect(type, name, dockerImpl);
   if (!item) return;
@@ -103,6 +107,8 @@ export async function runNative({ owner, output, apiRevision: revision }) {
   const prefix = 'bairui-m1-native-' + owner;
   const names = Object.fromEntries(['exporter', 'sampler', 'bridge', 'volume'].map(kind => [kind, prefix + '-' + kind]));
   const network = prefix + '-net', prometheus = prefix + '-prometheus', promVolume = prefix + '-promdata';
+  const churn = prefix + '-churn', badSampler = prefix + '-bad-sampler', rootAliasPath = join(directory, 'host-root');
+  let mountTopology, dockerRoot, rootAliasCreated = false;
   const sourcePath = join(root, 'apps/platform-api/src/observability/host-metrics-bridge.mjs');
   const report = { version: 1, owner, startedAt: new Date().toISOString(), passed: false, checks: [], resources: { ...names, network, prometheus, promVolume } };
   const step = async (name, action) => {
@@ -125,6 +131,8 @@ export async function runNative({ owner, output, apiRevision: revision }) {
   try {
     await step('native_preflight', async () => {
       const info = JSON.parse(await docker(['info', '--format', '{{json .}}'])); assertNativeHost(process.platform, info);
+      dockerRoot = info.DockerRootDir;
+      mountTopology = hostFilesystemMounts(await readFile('/proc/1/mountinfo', 'utf8'), dockerRoot);
       const kernel = await command('uname', ['-r']), mounts = await readFile('/proc/self/mountinfo', 'utf8'); assertHostMountPrerequisites(kernel, mounts);
       await freePort();
       const available = Number((await command('df', ['-B1', '--output=avail', '/var/lib/docker'])).split('\n').at(-1).trim());
@@ -144,7 +152,8 @@ export async function runNative({ owner, output, apiRevision: revision }) {
       for (const args of hostCacheInitializationArgs({ installation: owner, revision, volume: names.volume })) await docker(ownedArgs(args));
       return { network, cacheVolume: names.volume, prometheusVolume: promVolume, publishedPorts: [] };
     });
-    const args = hostContainerArgs({ installation: owner, revision, sourcePath, names, network });
+    rootAliasCreated = await ensureHostRootAlias(rootAliasPath);
+    const args = hostContainerArgs({ installation: owner, revision, sourcePath, names, network, rootAliasPath, mountTopology, mountPaths: mountTopology.map(row => row.path), dockerRoot });
     await step('exporter_production_mount_and_recursive_readonly', async () => {
       await docker(ownedArgs(args.exporter));
       const item = await inspect('container', names.exporter);
@@ -152,7 +161,8 @@ export async function runNative({ owner, output, apiRevision: revision }) {
       await writeFile(join(directory, 'exporter-mountinfo.txt'), mountinfo + '\n');
       const hostMounts = checkHostMounts(mountinfo);
       assert.equal(item.HostConfig.NetworkMode, 'host'); assert.equal(item.HostConfig.PidMode, 'host');
-      assert.equal(item.Mounts[0].Propagation, 'rslave'); assert.equal(item.Mounts[0].RW, false);
+      assert.ok(item.Mounts.every(m => m.Propagation === 'rprivate' && m.RW === false));
+      assert.ok(item.HostConfig.Mounts.every(m => m.BindOptions.NonRecursive === true));
       return { containerId: item.Id, hostMountCount: hostMounts.length, allHostMountsReadonly: true, rootMount: hostMounts.find(row => row.path === '/host'), mount: item.Mounts[0] };
     });
     await step('sampler_bridge_and_private_prometheus', async () => {
@@ -172,6 +182,29 @@ export async function runNative({ owner, output, apiRevision: revision }) {
       assert.equal((await inspect('network', network)).Internal, true);
       return { freshBridgeStatus: data.status, metricBytes: Buffer.byteLength(data.body), publishedPorts: [] };
     });
+    await step('readonly_survives_peer_creation_and_bound_topology_is_host_view', async () => {
+      const bound = await docker(['exec', names.sampler, 'cat', '/app/host-mountinfo']);
+      assert.deepEqual(hostFilesystemMounts(bound, dockerRoot), mountTopology);
+      await docker(['run', '-d', '--pull=never', '--name', churn, '--label', ownerLabel + '=' + owner, '--network', network,
+        '--user=1000:1000', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges:true', '--memory=64m', '--cpus=0.1', '--pids-limit=32',
+        '--entrypoint=node', apiImage, '-e', 'setInterval(()=>{},1000)']);
+      const mounts = checkHostMounts(await docker(['exec', names.exporter, 'cat', '/proc/self/mountinfo']));
+      assert.equal(mounts.length, mountTopology.length);
+      await removeOwnedResource({ type: 'container', name: churn, owner });
+      checkHostMounts(await docker(['exec', names.exporter, 'cat', '/proc/self/mountinfo']));
+      return { allHostMountsReadonlyAndPrivate: true, hostMountCount: mounts.length, hostTopologyVerified: true, churnContainerRemoved: true };
+    });
+    await step('mismatched_topology_rejects_and_clears_sample_without_host_mount_changes', async () => {
+      await docker(['stop', '--time', '5', names.sampler]);
+      const badArgs = ownedArgs(args.sampler).map(value => value === names.sampler ? badSampler : value);
+      const manifest = JSON.parse(badArgs.at(-1)); manifest.mounts[0].id += '-mismatch'; badArgs[badArgs.length - 1] = JSON.stringify(manifest);
+      await docker(badArgs);
+      await waitFor(async () => (await bridge()).status === 503, 'topology mismatch clears previous snapshot', 20000);
+      await removeOwnedResource({ type: 'container', name: badSampler, owner });
+      await docker(['start', names.sampler]);
+      await waitFor(async () => (await bridge()).status === 200, 'valid topology restores sampling', 30000);
+      return { mismatchBridgeStatus: 503, recoveredBridgeStatus: 200, noHostMountChanges: true };
+    });
     await step('real_host_memory_and_prometheus_up', async () => {
       await waitFor(() => up(1), 'host scrape up=1');
       const hostBytes = Number((await readFile('/proc/meminfo', 'utf8')).match(/^MemTotal:\s+(\d+) kB/m)[1]) * 1024;
@@ -183,9 +216,12 @@ export async function runNative({ owner, output, apiRevision: revision }) {
     });
     await step('all_24_fixed_promql_queries_parse_and_cpu_rate_observed', async () => {
       assert.equal(hostDashboardExpressions.length, 24);
-      const results = [];
-      for (const [index, expr] of hostDashboardExpressions.entries()) results.push({ panel: index + 1, expr, resultSeries: (await query(expr)).length });
       await waitFor(async () => (await query(hostDashboardExpressions[4])).length > 0, 'real one-minute CPU counter rate');
+      const results = [];
+      for (const [index, expr] of hostDashboardExpressions.entries()) {
+        const series = await query(expr); assert.ok(series.length > 0, 'panel_' + (index + 1) + '_must_have_real_data');
+        results.push({ panel: index + 1, expr, resultSeries: series.length });
+      }
       return results;
     });
     await step('exporter_failure_removes_sample_and_resources_then_recovers', async () => {
@@ -200,11 +236,10 @@ export async function runNative({ owner, output, apiRevision: revision }) {
       return { failedBridge: 503, failedUp: 0, failedMemorySeries: 0, recoveredBridge: 200, recoveredUp: 1 };
     });
     await step('stopped_sampler_sample_expires_after_45_seconds_without_simulated_time', async () => {
-      await waitFor(async () => {
-        const current = await bridge();
-        const timestamp = Number(current.body.match(/^bairui_host_metrics_sample_timestamp_seconds ([\d.]+)$/m)?.[1]) * 1000;
-        return current.status === 200 && Date.now() - timestamp < 1500;
-      }, 'new sample immediately before sampler stop', 25000);
+      const initial = await bridge();
+      const previous = Number(initial.body.match(/^bairui_host_metrics_sample_timestamp_seconds ([\d.]+)$/m)?.[1]) * 1000;
+      assert.ok(Number.isFinite(previous));
+      await waitFor(async () => hasNewHostSample(await bridge(), previous), 'new real sample before sampler stop', 35000);
       await docker(['stop', '--time', '5', names.sampler]);
       const latest = await bridge(); assert.equal(latest.status, 200);
       const sampledAt = Number(latest.body.match(/^bairui_host_metrics_sample_timestamp_seconds ([\d.]+)$/m)[1]) * 1000;
@@ -222,7 +257,7 @@ export async function runNative({ owner, output, apiRevision: revision }) {
     }
   } finally {
     const errors = [];
-    for (const [type, name] of [['container', names.sampler], ['container', names.bridge], ['container', names.exporter], ['container', prometheus], ['volume', names.volume], ['volume', promVolume], ['network', network]]) {
+    for (const [type, name] of [['container', churn], ['container', badSampler], ['container', names.sampler], ['container', names.bridge], ['container', names.exporter], ['container', prometheus], ['volume', names.volume], ['volume', promVolume], ['network', network]]) {
       try { await removeOwnedResource({ type, name, owner }); } catch (error) { errors.push(error.message); }
     }
     try {
@@ -230,6 +265,7 @@ export async function runNative({ owner, output, apiRevision: revision }) {
       assert.deepEqual(after, existing, 'existing_running_container_IDs_changed');
       const remaining = await docker(['ps', '-aq', '--filter', 'label=' + ownerLabel + '=' + owner]); assert.equal(remaining, '', 'temporary_containers_remaining');
     } catch (error) { errors.push(error.message); }
+    if (rootAliasCreated) await unlink(rootAliasPath).catch(error => { if (error.code !== 'ENOENT') errors.push(error.message); });
     report.cleanup = { passed: errors.length === 0, errors }; if (errors.length) report.passed = false;
     report.finishedAt = new Date().toISOString(); await writeFile(output, JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify({ finished: true, passed: report.passed, cleanup: report.cleanup, output }));

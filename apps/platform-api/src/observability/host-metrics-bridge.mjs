@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { constants } from 'node:fs';
-import { open, rename, unlink, writeFile } from 'node:fs/promises';
+import { open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -16,6 +16,29 @@ const families = new Map([
   ...['receive_bytes_total', 'transmit_bytes_total', 'receive_errs_total', 'transmit_errs_total', 'receive_drop_total', 'transmit_drop_total'].map(name => ['node_network_' + name, ['device']]),
 ]);
 const invalid = () => { throw new Error('host_metrics_unavailable'); };
+
+export function hostFilesystemMounts(text, dockerRoot = '/var/lib/docker') {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > 4 * 1024 * 1024 || typeof dockerRoot !== 'string' || !dockerRoot.startsWith('/') || dockerRoot === '/') invalid();
+  const excludedPath = /^\/(dev|proc|sys|run|var\/lib\/docker|var\/lib\/containers)($|\/)/;
+  const excludedFs = /^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$/;
+  const decode = value => value.replace(/\\(040|011|012|134)/g, (_, n) => String.fromCharCode(parseInt(n, 8)));
+  const rows = [], seen = new Set();
+  for (const line of text.trim().split('\n')) {
+    const [before, after] = line.split(' - '), fields = before.split(' ');
+    if (!after || fields.length < 6) invalid();
+    const path = decode(fields[4]), fstype = after.split(' ')[0];
+    if (excludedPath.test(path) || excludedFs.test(fstype) || path === dockerRoot || path.startsWith(dockerRoot + '/')) continue;
+    if (!/^\/[A-Za-z0-9_./ -]*$/.test(path) || path.includes('//') || path.split('/').some(s => s === '.' || s === '..') || seen.has(path)) invalid();
+    seen.add(path); rows.push({ id: fields[0], path, device: fields[2], root: fields[3], fstype });
+  }
+  if (!seen.has('/') || rows.length > 64) invalid();
+  return rows.sort((a, b) => a.path.length - b.path.length || a.path.localeCompare(b.path));
+}
+
+export function assertHostMountTopology(text, expected) {
+  if (!expected || !Array.isArray(expected.mounts) || !expected.mounts.length || typeof expected.dockerRoot !== 'string') invalid();
+  if (JSON.stringify(hostFilesystemMounts(text, expected.dockerRoot)) !== JSON.stringify(expected.mounts)) invalid();
+}
 
 export function filterHostMetrics(input) {
   if (typeof input !== 'string' || Buffer.byteLength(input) > MAX_BYTES) invalid();
@@ -71,8 +94,9 @@ export async function readHostSnapshot(directory, now = Date.now()) {
   return filterHostMetrics(value.text) + '# TYPE bairui_host_metrics_sample_timestamp_seconds gauge\nbairui_host_metrics_sample_timestamp_seconds ' + value.sampledAt / 1000 + '\n';
 }
 
-export async function sampleHostMetrics({ directory, fetchImpl = fetch, now = Date.now, signal } = {}) {
+export async function sampleHostMetrics({ directory, fetchImpl = fetch, now = Date.now, signal, verifyTopology } = {}) {
   try {
+    await verifyTopology?.();
     const sampledAt = now();
     const response = await fetchImpl('http://127.0.0.1:19100/metrics', { redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(3000)]) : AbortSignal.timeout(3000) });
     if (!response.ok || !response.body) { await response.body?.cancel(); invalid(); }
@@ -80,6 +104,7 @@ export async function sampleHostMetrics({ directory, fetchImpl = fetch, now = Da
     try {
       for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > MAX_BYTES) invalid(); chunks.push(value); }
     } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+    await verifyTopology?.();
     await writeHostSnapshot(directory, Buffer.concat(chunks).toString('utf8'), sampledAt);
   } catch {
     await unlink(join(directory, 'snapshot.json')).catch(error => { if (error.code !== 'ENOENT') throw error; });
@@ -103,13 +128,17 @@ export function createHostMetricsBridge({ directory, now = Date.now } = {}) {
   });
 }
 
-async function main(mode) {
+async function main(mode, topology) {
   const directory = '/data';
   const abort = new AbortController();
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => abort.abort());
   if (mode === 'sampler') {
+    if (!topology || !Array.isArray(topology.mounts) || !topology.mounts.length || typeof topology.dockerRoot !== 'string') invalid();
+    const verifyTopology = async () => {
+      assertHostMountTopology(await readFile('/app/host-mountinfo', 'utf8'), topology);
+    };
     while (!abort.signal.aborted) {
-      try { await sampleHostMetrics({ directory, signal: abort.signal }); } catch { if (!abort.signal.aborted) console.error('host_metrics_sample_failed'); }
+      try { await sampleHostMetrics({ directory, signal: abort.signal, verifyTopology }); } catch { if (!abort.signal.aborted) console.error('host_metrics_sample_failed'); }
       try { await delay(15000, undefined, { signal: abort.signal }); } catch { break; }
     }
   } else if (mode === 'bridge') {
@@ -119,5 +148,9 @@ async function main(mode) {
   } else throw new Error('host_metrics_mode_invalid');
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  main(process.argv.length === 3 ? process.argv[2] : '').catch(() => { console.error('host_metrics_start_failed'); process.exitCode = 1; });
+  const run = async () => {
+    if (process.argv[2] === 'sampler' && process.argv.length === 4) return main('sampler', JSON.parse(process.argv[3]));
+    return main(process.argv.length === 3 ? process.argv[2] : '');
+  };
+  run().catch(() => { console.error('host_metrics_start_failed'); process.exitCode = 1; });
 }

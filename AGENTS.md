@@ -21,6 +21,15 @@
 
 ## 项目定位
 
+### 单机统一运维（2026-11-22；本机实例已清理，云端未操作）
+
+- 用户选择复用原常驻预发，统一入口为 `npm run deploy -- check|up|update|status|logs|backup|stop`，文档 `docs/60-unified-deployment-operations.md`。保留单节点 Swarm、原安装身份、数据库卷、Secret 和同源入口；未迁移 Compose 或合并业务库。
+- 默认单 API，显式 `up --replicas 2` 保存双副本用于专项；监控阈值使用固定配置指标，旧镜像仍按两份基线。双 API 故障验收在单副本时前置拒绝，不降低隔离和故障断言。
+- update 先完成迁移与资源前检，再停止、冷备、部署当前源码；冷备失败保持停止，不自动迁移数据库或回退数据。冷备依赖原 Swarm Secret 与镜像，不是异机灾难恢复包；helper 随机归属、源卷只读，残留会阻止再次启动。
+- 仅显式 `consolidate business-monitoring` 停独立业务监控并保留历史，不自动停止业务 PostgreSQL、Runtime 或用户 Agent。已启用模块沿用原联动；未启用模块及真实 Agent 不自动开放，已有 M1 改动保留。
+- 用户另行授权本机恢复后，已冷备原六卷并核验 040 基线，追加 041–047 及最小应用授权，保留账号/权限/历史；邮箱仍 off、真实 Agent 仍关闭。原常驻预发通过统一 up 单副本恢复为 6 个 1/1 Swarm 服务、9 个项目容器，构建版本 `c3a534d530bb3f53`，访问 `https://localhost:8443/`、`/admin/`。仅采集已恢复的 preprod Controller；business 环境不启动。详见 docs/60 第 7 节及 `output/deployment/local-smoke-20261122.json`，云服务器未操作。
+- 随后用户明确要求停止并清除本地实例，已删除本项目全部 22 个容器（含 Swarm 历史任务）和 6 个 Swarm 服务，复核无残留；219 个原有卷、全部镜像/Secret、源码和其他项目四个容器保持原样。上条恢复记录是历史验收，不表示本地当前在运行；未获重新授权不得启动。
+
 ### 邮箱验证与密码找回（2026-11-12；默认关闭，未部署）
 
 - 使用原 Better Auth 1.7.5 与 047 邮箱挑战迁移，支持 Resend。启用前在独立预发核验迁移、HTTPS 和真实收信；配置见 `docs/59-auth-email-verification-and-recovery.md`。

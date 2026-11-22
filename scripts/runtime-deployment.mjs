@@ -328,15 +328,23 @@ export async function assertRuntimeResources(environment, preprod) {
   }
   for (const kind of ['controller', 'orchestrator']) await runtimeOwned('container', n[kind], state);
 }
-export async function stopRuntimeEnvironment(environment) {
-  const state = await loadRuntimeState(environment); if (!state) throw new Error('runtime_state_missing');
+export async function stopRuntimeEnvironment(environment, {
+  load = loadRuntimeState, local = localDocker, find = runtimeOwned, command = docker, persist = save,
+} = {}) {
+  const state = await load(environment); if (!state) throw new Error('runtime_state_missing');
+  const machine = await local();
+  assert.equal(state.nodeId, machine.nodeId, 'runtime_node_mismatch');
+  assert.equal(state.endpoint, machine.endpoint, 'runtime_endpoint_mismatch');
   const n = runtimeNames(environment);
+  // Check both owners before stopping either. Missing containers are already
+  // stopped, so a partially removed installation can be stopped idempotently.
+  const targets = [];
   for (const kind of ['controller', 'orchestrator']) {
-    const item = await runtimeOwned('container', n[kind], state);
-    if (!item) throw new Error('runtime_container_missing');
-    await docker(['stop', '--time', '30', item.Id]);
+    const item = await find('container', n[kind], state);
+    if (item?.State?.Running) targets.push(item.Id);
   }
-  state.running = false; await save(state);
+  for (const id of targets) await command(['stop', '--time', '30', id]);
+  state.running = false; await persist(state);
 }
 export async function markPreprodRuntimeEnabled() {
   const p = await loadState();

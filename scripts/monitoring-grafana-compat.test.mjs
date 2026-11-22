@@ -245,7 +245,7 @@ try {
     });
     await page.goto(origin + '/admin/'); await page.getByRole('button', { name: '运行监控', exact: true }).click();
     const iframe = page.frameLocator('iframe');
-    await iframe.getByText('API 可采集副本 / 预期 2', { exact: true }).waitFor({ timeout: 45000 });
+    await iframe.getByText('API 可采集副本', { exact: true }).waitFor({ timeout: 45000 });
     for (const panel of assets['dashboard.json'].panels) await iframe.getByText(panel.title, { exact: true }).scrollIntoViewIfNeeded();
     const queryDeadline = Date.now() + 30000;
     while (covered(platformExpressions).length < platformExpressions.length && Date.now() < queryDeadline) await delay(100);
@@ -258,8 +258,8 @@ try {
     assert.equal(await page.getByRole('link', { name: '独立打开 Grafana' }).count(), 0);
     const refreshed = page.waitForResponse(response => response.url() === prefix + '/api/health');
     await page.getByRole('button', { name: '刷新监控', exact: true }).click(); await refreshed;
-    await iframe.getByText('API 可采集副本 / 预期 2', { exact: true }).waitFor();
-    await iframe.getByText('API 可采集副本 / 预期 2', { exact: true }).scrollIntoViewIfNeeded();
+    await iframe.getByText('API 可采集副本', { exact: true }).waitFor();
+    await iframe.getByText('API 可采集副本', { exact: true }).scrollIntoViewIfNeeded();
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 1000 });
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -287,7 +287,7 @@ try {
     await page.frameLocator('iframe').getByText(assets['dashboard-host.json'].panels[0].title, { exact: true }).waitFor({ timeout: 45000 });
     assert.match(await page.locator('iframe').getAttribute('src'), /\/d\/bairui-host\//);
     await page.getByRole('button', { name: '平台运行', exact: true }).click();
-    await page.frameLocator('iframe').getByText('API 可采集副本 / 预期 2', { exact: true }).waitFor({ timeout: 45000 });
+    await page.frameLocator('iframe').getByText('API 可采集副本', { exact: true }).waitFor({ timeout: 45000 });
     assert.equal(context.pages().length, 1);
     report.browser = { queriedPanels: platformPanelCount, hostPanels: covered(hostExpressions).length, hostExpressions: covered(hostExpressions), hostCollectionEnabled: false, httpErrors: [...failedNative], queryErrors: [...failedQueries], pageErrors: [...pageErrors],
       emptyDataAllowed: true, folderUid: (await document()).meta.folderUid };

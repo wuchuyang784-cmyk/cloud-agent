@@ -10,13 +10,21 @@ const monitorInput = { ...input, monitoring: { enabled: true, gatewayIp: '10.0.3
 
 test('existing Grafana dashboard checksum is bumped to migrate its fixed folder without replacing identity or volume', () => {
   const files = monitoringAssets(), dashboard = files['dashboard.json'];
-  assert.equal(dashboard.version, 2, 'existing Grafana volumes need changed dashboard bytes, not only a provider folder update');
+  assert.equal(dashboard.version, 3, 'changed panel text must update existing provisioned dashboards');
   assert.equal(dashboard.uid, 'bairui-platform'); assert.equal(dashboard.schemaVersion, 39); assert.equal(dashboard.panels.length, 12);
   assert.equal(files['dashboards.json'].providers[0].folderUid, 'bairui-platform-folder');
   assert.equal(files['dashboards.json'].providers[0].folder, 'BaiRui 平台监控');
   assert.ok(monitoringStack(monitorInput).services.grafana.volumes.includes('grafanadata:/var/lib/grafana'));
   assert.equal(monitoringStack(monitorInput).volumes.grafanadata.external.name, monitorNames.grafanaVolume);
   assert.notEqual(JSON.stringify({ ...dashboard, version: 1 }), JSON.stringify(dashboard));
+});
+
+test('replica alert uses configured target and the dashboard does not hard-code two replicas', () => {
+  const files = monitoringAssets();
+  const rule = files['rules.json'].groups[0].rules.find(r => r.alert === 'ApiReplicaMissing');
+  assert.match(rule.expr, /bairui_api_expected_replicas/);
+  assert.match(rule.expr, /or vector\(2\)/, 'older API images retain their two-replica baseline');
+  assert.equal(files['dashboard.json'].panels[0].title, 'API 可采集副本');
 });
 
 test('managed runtime monitoring is opt-in and uses separate fixed environment targets', () => {

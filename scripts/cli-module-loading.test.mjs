@@ -15,6 +15,8 @@ for (const entry of ['preprod.mjs', 'monitoring.mjs']) {
       await mkdir(join(dir, 'scripts'));
       await mkdir(join(dir, 'output', 'preprod'), { recursive: true });
       await mkdir(join(dir, 'apps', 'platform-api', 'src', 'admin'), { recursive: true });
+      await mkdir(join(dir, 'apps', 'platform-api', 'src', 'observability'), { recursive: true });
+      await copyFile(new URL('../apps/platform-api/src/observability/host-metrics-bridge.mjs', import.meta.url), join(dir, 'apps', 'platform-api', 'src', 'observability', 'host-metrics-bridge.mjs'));
       await copyFile(new URL('../apps/platform-api/src/admin/monitoring-origin.mjs', import.meta.url), join(dir, 'apps', 'platform-api', 'src', 'admin', 'monitoring-origin.mjs'));
       await copyFile(new URL('../apps/platform-api/src/admin/host-dashboard.mjs', import.meta.url), join(dir, 'apps', 'platform-api', 'src', 'admin', 'host-dashboard.mjs'));
       for (const file of ['preprod.mjs', 'preprod-config.mjs', 'monitoring.mjs', 'monitoring-config.mjs', 'host-monitoring.mjs', 'host-monitoring-config.mjs', 'monitoring-rules.test.mjs', 'runtime-monitoring-config.mjs', 'runtime-deployment-config.mjs', 'cli-keepalive.mjs']) {

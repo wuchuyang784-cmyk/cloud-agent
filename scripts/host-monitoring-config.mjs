@@ -1,5 +1,18 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { lstat, readlink, realpath, symlink } from 'node:fs/promises';
+import { hostFilesystemMounts } from '../apps/platform-api/src/observability/host-metrics-bridge.mjs';
+export { hostFilesystemMounts };
+
+export async function ensureHostRootAlias(path) {
+  assert.equal(process.platform, 'linux', 'host_metrics_native_linux_required');
+  assert.ok(path.endsWith('/host-root'), 'host_metrics_root_alias_invalid');
+  let created = false;
+  try { await symlink('/', path); created = true; } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  const info = await lstat(path);
+  assert.ok(info.isSymbolicLink() && info.uid === process.getuid() && await readlink(path) === '/' && await realpath(path) === '/', 'host_metrics_root_alias_invalid');
+  return created;
+}
 
 export const hostExporterImage = 'prom/node-exporter:v1.10.2@sha256:3ac34ce007accad95afed72149e0d2b927b7e42fd1c866149b945b84737c62c3';
 export const hostNames = Object.freeze({ exporter: 'bairui-host-exporter', sampler: 'bairui-host-sampler', bridge: 'bairui-host-metrics', volume: 'bairui-monitor-host-cache' });
@@ -16,8 +29,14 @@ function mountRows(text) {
   return text.trim().split('\n').filter(Boolean).map(line => {
     const [before, after] = line.split(' - '); assert.ok(after, 'host_mountinfo_invalid');
     const fields = before.split(' '); assert.ok(fields.length >= 6, 'host_mountinfo_invalid');
-    return { path: fields[4].replace(/\\(040|011|012|134)/g, (_, value) => String.fromCharCode(parseInt(value, 8))), options: fields[5].split(','), optional: fields.slice(6) };
+    return { path: fields[4].replace(/\\(040|011|012|134)/g, (_, value) => String.fromCharCode(parseInt(value, 8))), options: fields[5].split(','), optional: fields.slice(6), device: fields[2], root: fields[3], fstype: after.split(' ')[0] };
   });
+}
+
+const excludedPath = /^\/(dev|proc|sys|run|var\/lib\/docker|var\/lib\/containers)($|\/)/;
+function assertMountPath(path) {
+  assert.ok(typeof path === 'string' && /^\/[A-Za-z0-9_./ -]*$/.test(path) && !path.split('/').some(s => s === '.' || s === '..')
+    && !path.includes('//') && (path === '/' || !path.endsWith('/')) && !excludedPath.test(path), 'host_metrics_mount_path_invalid');
 }
 
 export function assertHostMountPrerequisites(kernel, mountinfo) {
@@ -31,16 +50,24 @@ export function assertHostRootReadonly(mountinfo) {
   const rows = mountRows(mountinfo).filter(row => row.path === '/host' || row.path.startsWith('/host/'));
   assert.ok(rows.some(row => row.path === '/host'), 'host_metrics_root_mount_missing');
   assert.ok(rows.every(row => row.options.includes('ro') && !row.options.includes('rw')), 'host_metrics_submount_not_readonly');
+  assert.ok(rows.every(row => !row.optional.some(flag => /^(shared|master|propagate_from):/.test(flag))), 'host_metrics_mount_propagation_not_private');
 }
 export function hostScrapeJob() {
   return { job_name: 'bairui-host', static_configs: [{ targets: ['bairui-host-metrics:9100'], labels: { bairui_host_source: 'linux-host' } }],
     scrape_interval: '15s', scrape_timeout: '5s', sample_limit: 5000, label_limit: 12, label_value_length_limit: 256, body_size_limit: '512KB' };
 }
-export function hostContainerArgs({ installation, revision, sourcePath, release = revision, names = hostNames, network = 'bairui-preprod-monitor' }) {
+export function hostContainerArgs({ installation, revision, sourcePath, rootAliasPath, mountPaths, mountTopology, dockerRoot = '/var/lib/docker', release = revision, names = hostNames, network = 'bairui-preprod-monitor' }) {
   assert.match(installation, /^[a-f0-9]{24}$/); assert.match(revision, /^[a-f0-9]{16}$/);
   assert.match(release, /^(?:[a-f0-9]{16}|[a-f0-9]{64})$/);
   assert.match(sourcePath, /^(?:[A-Za-z]:\/|\/)[A-Za-z0-9_./ -]+\/host-metrics-bridge\.mjs$/);
   assert.ok(!sourcePath.includes('/../') && !sourcePath.includes('/./'));
+  assert.ok(typeof rootAliasPath === 'string' && /^\/[A-Za-z0-9_./ -]+\/host-root$/.test(rootAliasPath)
+    && !rootAliasPath.split('/').some(s => s === '.' || s === '..'), 'host_metrics_root_alias_invalid');
+  assert.ok(Array.isArray(mountPaths) && mountPaths.length > 0 && mountPaths.length <= 64 && mountPaths[0] === '/'
+    && new Set(mountPaths).size === mountPaths.length, 'host_metrics_filesystem_mounts_invalid');
+  for (const path of mountPaths) assertMountPath(path);
+  assert.ok(Array.isArray(mountTopology) && JSON.stringify(mountTopology.map(row => row.path)) === JSON.stringify(mountPaths), 'host_metrics_filesystem_topology_required');
+  const filesystemInclude = '^(?:' + mountPaths.map(path => path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$';
   for (const key of ['exporter', 'sampler', 'bridge', 'volume']) assert.match(names[key], /^[a-z][a-z0-9-]{2,100}$/);
   assert.equal(new Set(Object.values(names)).size, 4); assert.match(network, /^[a-z][a-z0-9-]{2,100}$/);
   const base = (kind, memory, cpu) => ['run', '-d', '--pull=never', '--name', names[kind], '--label', 'bairui.preprod.installation=' + installation,
@@ -50,13 +77,17 @@ export function hostContainerArgs({ installation, revision, sourcePath, release 
   const code = ['--mount', 'type=bind,source=' + sourcePath + ',target=/app/host-metrics-bridge.mjs,readonly', '--entrypoint=node', node, '/app/host-metrics-bridge.mjs'];
   return {
     exporter: [...base('exporter', '64m', '0.20'), '--user=65534:65534', '--network=host', '--pid=host',
-      '--mount', 'type=bind,source=/,target=/host,readonly,bind-propagation=rslave',
+      // Never recursively retain Docker overlay/netns references. Each selected
+      // filesystem is a separate private read-only bind, through a checked alias.
+      ...mountPaths.flatMap(path => ['--mount', 'type=bind,source=' + rootAliasPath + (path === '/' ? '' : path)
+        + ',target=/host' + (path === '/' ? '' : path) + ',readonly,bind-recursive=disabled,bind-propagation=rprivate']),
       hostExporterImage, '--web.listen-address=127.0.0.1:19100', '--web.disable-exporter-metrics', '--path.rootfs=/host', '--collector.disable-defaults',
       ...['cpu', 'meminfo', 'stat', 'time', 'filesystem', 'diskstats', 'netdev'].map(name => '--collector.' + name),
-      '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker|var/lib/containers)($|/)',
+      '--collector.filesystem.mount-points-include=' + filesystemInclude,
       '--collector.netdev.device-exclude=^(lo|docker.*|br-.*|veth.*|vxlan.*|tun.*|tap.*|tailscale.*)$',
       '--collector.diskstats.device-exclude=^(ram|loop|fd|sr)[0-9]+$', '--log.level=warn'],
-    sampler: [...base('sampler', '96m', '0.15'), '--user=1000:1000', '--network=host', '--mount', 'type=volume,source=' + names.volume + ',target=/data', ...code, 'sampler'],
+    sampler: [...base('sampler', '96m', '0.15'), '--user=1000:1000', '--network=host', '--mount', 'type=volume,source=' + names.volume + ',target=/data',
+      '--mount', 'type=bind,source=/proc/1/mountinfo,target=/app/host-mountinfo,readonly,bind-recursive=disabled,bind-propagation=rprivate', ...code, 'sampler', JSON.stringify({ mounts: mountTopology, dockerRoot })],
     bridge: [...base('bridge', '96m', '0.15'), '--user=1000:1000', '--network=' + network, '--network-alias=bairui-host-metrics',
       '--mount', 'type=volume,source=' + names.volume + ',target=/data,readonly', ...code, 'bridge'],
   };
@@ -64,7 +95,7 @@ export function hostContainerArgs({ installation, revision, sourcePath, release 
 
 export function hostReleaseRevision(input, sourceCode) {
   assert.equal(typeof sourceCode, 'string'); assert.ok(Buffer.byteLength(sourceCode) <= 1024 * 1024);
-  return createHash('sha256').update(JSON.stringify(hostContainerArgs(input))).update(sourceCode).digest('hex');
+  return createHash('sha256').update(JSON.stringify(hostContainerArgs(input))).update(JSON.stringify(input.mountTopology ?? [])).update(sourceCode).digest('hex');
 }
 
 export function hostCacheInitializationArgs({ installation, revision, volume = hostNames.volume }) {
